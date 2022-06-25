@@ -67,33 +67,146 @@
 namespace MatrixFreeTools {
   using namespace dealii;
 
-  template<int dim, typename Number, typename VectorizedArrayType>
-  void compute_diagonal(const MatrixFree<dim, Number, VectorizedArrayType>&                            matrix_free,
-                        LinearAlgebra::distributed::Vector<Number>&                                    diagonal_global,
-                        const std::function<void(const MatrixFree<dim, Number, VectorizedArrayType>&,
-                                                 LinearAlgebra::distributed::Vector<Number>&,
-                                                 const unsigned int&,
-                                                 const std::pair<unsigned int, unsigned int>&)>& 	     cell_operation,
-                        const std::function<void(const MatrixFree<dim, Number, VectorizedArrayType>&,
-                                                 LinearAlgebra::distributed::Vector<Number>&,
-                                                 const unsigned int&,
-                                                 const std::pair<unsigned int, unsigned int>&)>& 	     face_operation,
-                        const std::function<void(const MatrixFree<dim, Number, VectorizedArrayType>&,
-                                                 LinearAlgebra::distributed::Vector<Number>&,
-                                                 const unsigned int&,
-                                                 const std::pair<unsigned int, unsigned int>&)>& 	     boundary_operation,
-                        const unsigned int                                                             dof_no = 0) {
+  template<int dim, int fe_degree, int n_q_points_1d, int n_components, typename Number, typename VectorizedArrayType>
+  void compute_diagonal(const MatrixFree<dim, Number, VectorizedArrayType>&            matrix_free,
+                        LinearAlgebra::distributed::Vector<Number>&                    diagonal_global,
+                        const std::function<void(FEEvaluation<dim,
+                                                              fe_degree,
+                                                              n_q_points_1d,
+                                                              n_components,
+                                                              Number,
+                                                              VectorizedArrayType>&)>& local_vmult_cell,
+                        const std::function<void(FEFaceEvaluation<dim,
+                                                                  fe_degree,
+                                                                  n_q_points_1d,
+                                                                  n_components,
+                                                                  Number,
+                                                                  VectorizedArrayType>&,
+                                                 FEFaceEvaluation<dim,
+                                                                  fe_degree,
+                                                                  n_q_points_1d,
+                                                                  n_components,
+                                                                  Number,
+                                                                  VectorizedArrayType>&)>& local_vmult_face,
+                        const std::function<void(FEFaceEvaluation<dim,
+                                                                  fe_degree,
+                                                                  n_q_points_1d,
+                                                                  n_components,
+                                                                  Number,
+                                                                  VectorizedArrayType>&)>& local_vmult_boundary,
+                        const unsigned int                                             dof_no = 0,
+                        const unsigned int                                             quad_no = 0,
+                        const unsigned int                                             first_selected_component = 0) {
+    using VectorType = LinearAlgebra::distributed::Vector<Number>;
+
     // initialize vector
     matrix_free.initialize_dof_vector(diagonal_global, dof_no);
 
-    const unsigned int dummy = 0;
+    int dummy = 0;
 
-    matrix_free.loop(cell_operation, face_operation, boundary_operation,
-                     diagonal_global, dummy, false,
-                     MatrixFree<dim, Number>::DataAccessOnFaces::unspecified,
-                     MatrixFree<dim, Number>::DataAccessOnFaces::unspecified);
+    matrix_free.template loop<VectorType, int>(
+      [&](const MatrixFree<dim, Number, VectorizedArrayType>& matrix_free,
+          LinearAlgebra::distributed::Vector<Number>&         diagonal_global,
+          const int&,
+          const std::pair<unsigned int, unsigned int>&        cell_range) mutable {
+            FEEvaluation<dim, fe_degree, n_q_points_1d, n_components, Number, VectorizedArrayType>
+            phi(matrix_free, cell_range, dof_no, quad_no, first_selected_component);
+
+            AlignedVector<Tensor<1, n_components, VectorizedArrayType>> diagonal(phi.dofs_per_component);
+
+            Tensor<1, n_components, VectorizedArrayType> tmp;
+            for(unsigned int d = 0; d < n_components; ++d)
+              tmp[d] = VectorizedArrayType(1.0);
+
+            for(unsigned int cell = cell_range.first; cell < cell_range.second; ++cell) {
+              phi.reinit(cell);
+
+              for(unsigned int i = 0; i < phi.dofs_per_component; ++i) {
+                for(unsigned int j = 0; j < phi.dofs_per_component; ++j)
+                  phi.submit_dof_value(Tensor<1, n_components, VectorizedArrayType>(), j);
+                phi.submit_dof_value(tmp, i);
+
+                local_vmult_cell(phi);
+                diagonal[i] = phi.get_dof_value(i);
+              }
+              for(unsigned int i = 0; i < phi.dofs_per_component; ++i)
+                phi.submit_dof_value(diagonal[i], i);
+              phi.distribute_local_to_global(diagonal_global);
+            }
+          },
+      [&](const MatrixFree<dim, Number, VectorizedArrayType>& matrix_free,
+          LinearAlgebra::distributed::Vector<Number>&         diagonal_global,
+          const int&,
+          const std::pair<unsigned int, unsigned int>&        face_range) mutable {
+            FEFaceEvaluation<dim, fe_degree, n_q_points_1d, n_components, Number, VectorizedArrayType>
+            phi_p(matrix_free, face_range, true, dof_no, quad_no, first_selected_component),
+            phi_m(matrix_free, face_range, false, dof_no, quad_no, first_selected_component);
+
+            AlignedVector<Tensor<1, n_components, VectorizedArrayType>> diagonal_p(phi_p.dofs_per_component),
+                                                                        diagonal_m(phi_m.dofs_per_component);
+            Tensor<1, n_components, VectorizedArrayType> tmp;
+            for(unsigned int d = 0; d < n_components; ++d)
+              tmp[d] = VectorizedArrayType(1.0);
+
+            for(unsigned int face = face_range.first; face < face_range.second; ++face) {
+              phi_p.reinit(face);
+              phi_m.reinit(face);
+
+              for(unsigned int i = 0; i < phi_p.dofs_per_component; ++i) {
+                for(unsigned int j = 0; j < phi_p.dofs_per_component; ++j) {
+                  phi_p.submit_dof_value(Tensor<1, n_components, VectorizedArrayType>(), j);
+                  phi_m.submit_dof_value(Tensor<1, n_components, VectorizedArrayType>(), j);
+                }
+                phi_p.submit_dof_value(tmp, i);
+                phi_m.submit_dof_value(tmp, i);
+
+                local_vmult_face(phi_p, phi_m);
+                diagonal_p[i] = phi_p.get_dof_value(i);
+                diagonal_m[i] = phi_m.get_dof_value(i);
+              }
+              for(unsigned int i = 0; i < phi_p.dofs_per_component; ++i) {
+                phi_p.submit_dof_value(diagonal_p[i], i);
+                phi_m.submit_dof_value(diagonal_m[i], i);
+              }
+              phi_p.distribute_local_to_global(diagonal_global);
+              phi_m.distribute_local_to_global(diagonal_global);
+           }
+        },
+      [&](const MatrixFree<dim, Number, VectorizedArrayType>& matrix_free,
+          LinearAlgebra::distributed::Vector<Number>&         diagonal_global,
+          const int&,
+          const std::pair<unsigned int, unsigned int>&        boundary_range) mutable {
+            FEFaceEvaluation<dim, fe_degree, n_q_points_1d, n_components, Number, VectorizedArrayType>
+            phi(matrix_free, boundary_range, true, dof_no, quad_no, first_selected_component);
+
+            AlignedVector<Tensor<1, n_components, VectorizedArrayType>> diagonal(phi.dofs_per_component);
+
+            Tensor<1, n_components, VectorizedArrayType> tmp;
+            for(unsigned int d = 0; d < n_components; ++d)
+              tmp[d] = VectorizedArrayType(1.0);
+
+            for(unsigned int face = boundary_range.first; face < boundary_range.second; ++face) {
+              phi.reinit(face);
+
+              for(unsigned int i = 0; i < phi.dofs_per_component; ++i) {
+                for(unsigned int j = 0; j < phi.dofs_per_component; ++j)
+                  phi.submit_dof_value(Tensor<1, n_components, VectorizedArrayType>(), j);
+                phi.submit_dof_value(tmp, i);
+
+                local_vmult_boundary(phi);
+                diagonal[i] = phi.get_dof_value(i);
+              }
+              for(unsigned int i = 0; i < phi.dofs_per_component; ++i)
+                phi.submit_dof_value(diagonal[i], i);
+              phi.distribute_local_to_global(diagonal_global);
+            }
+          },
+      diagonal_global, dummy, false,
+      MatrixFree<dim, Number>::DataAccessOnFaces::unspecified,
+      MatrixFree<dim, Number>::DataAccessOnFaces::unspecified);
   }
 }
+
 
 // We include the code in a suitable namespace:
 //
@@ -349,18 +462,30 @@ namespace NS_TRBDF2 {
                                                   const Vec&                                   src,
                                                   const std::pair<unsigned int, unsigned int>& cell_range) const;
 
-    void assemble_diagonal_cell_term_velocity(const MatrixFree<dim, Number>&               data,
-                                              Vec&                                         dst,
-                                              const unsigned int&                          src,
-                                              const std::pair<unsigned int, unsigned int>& cell_range) const;
-    void assemble_diagonal_face_term_velocity(const MatrixFree<dim, Number>&               data,
-                                              Vec&                                         dst,
-                                              const unsigned int&                          src,
-                                              const std::pair<unsigned int, unsigned int>& face_range) const;
-    void assemble_diagonal_boundary_term_velocity(const MatrixFree<dim, Number>&               data,
-                                                  Vec&                                         dst,
-                                                  const unsigned int&                          src,
-                                                  const std::pair<unsigned int, unsigned int>& face_range) const;
+    void assemble_diagonal_cell_term_velocity(FEEvaluation<dim,
+                                                           fe_degree_v,
+                                                           n_q_points_1d_v,
+                                                           dim,
+                                                           Number,
+                                                           VectorizedArray<Number>>& phi) const;
+    void assemble_diagonal_face_term_velocity(FEFaceEvaluation<dim,
+                                                               fe_degree_v,
+                                                               n_q_points_1d_v,
+                                                               dim,
+                                                               Number,
+                                                               VectorizedArray<Number>>& phi_p,
+                                              FEFaceEvaluation<dim,
+                                                               fe_degree_v,
+                                                               n_q_points_1d_v,
+                                                               dim,
+                                                               Number,
+                                                               VectorizedArray<Number>>& phi_m) const;
+    void assemble_diagonal_boundary_term_velocity(FEFaceEvaluation<dim,
+                                                                   fe_degree_v,
+                                                                   n_q_points_1d_v,
+                                                                   dim,
+                                                                   Number,
+                                                                   VectorizedArray<Number>>& phi) const;
 
     void assemble_diagonal_cell_term_pressure(const MatrixFree<dim, Number>&               data,
                                               Vec&                                         dst,
@@ -1418,91 +1543,51 @@ namespace NS_TRBDF2 {
   //
   template<int dim, int fe_degree_p, int fe_degree_v, int n_q_points_1d_p, int n_q_points_1d_v, typename Vec>
   void NavierStokesProjectionOperator<dim, fe_degree_p, fe_degree_v, n_q_points_1d_p, n_q_points_1d_v, Vec>::
-  assemble_diagonal_cell_term_velocity(const MatrixFree<dim, Number>&               data,
-                                       Vec&                                         dst,
-                                       const unsigned int&                          ,
-                                       const std::pair<unsigned int, unsigned int>& cell_range) const {
+  assemble_diagonal_cell_term_velocity(FEEvaluation<dim,
+                                                    fe_degree_v,
+                                                    n_q_points_1d_v,
+                                                    dim,
+                                                    Number,
+                                                    VectorizedArray<Number>>& phi) const {
     if(TR_BDF2_stage == 1) {
-      FEEvaluation<dim, fe_degree_v, n_q_points_1d_v, dim, Number> phi(data, 0),
-                                                                   phi_old_extr(data, 0);
+      FEEvaluation<dim, fe_degree_v, n_q_points_1d_v, dim, Number, VectorizedArray<Number>>
+      phi_old_extr(phi.get_matrix_free(), 0);
 
-      AlignedVector<Tensor<1, dim, VectorizedArray<Number>>> diagonal(phi.dofs_per_component);
-      /*--- Build a vector of ones to be tested (here we will see the velocity as a whole vector, since
-                                                 dof_handler_velocity is vectorial and so the dof values are vectors). ---*/
-      Tensor<1, dim, VectorizedArray<Number>> tmp;
-      for(unsigned int d = 0; d < dim; ++d)
-        tmp[d] = make_vectorized_array<Number>(1.0);
+      phi.evaluate(EvaluationFlags::values | EvaluationFlags::gradients);
+      phi_old_extr.reinit(phi.get_current_cell_index());
+      phi_old_extr.gather_evaluate(u_extr, EvaluationFlags::values);
 
-      /*--- Loop over cells in the range ---*/
-      for(unsigned int cell = cell_range.first; cell < cell_range.second; ++cell) {
-        phi_old_extr.reinit(cell);
-        phi_old_extr.gather_evaluate(u_extr, true, false);
-        phi.reinit(cell);
+      /*--- Loop over quadrature points ---*/
+      for(unsigned int q = 0; q < phi.n_q_points; ++q) {
+        const auto& u_int                = phi.get_value(q);
+        const auto& grad_u_int           = phi.get_gradient(q);
+        const auto& u_n_gamma_ov_2       = phi_old_extr.get_value(q);
+        const auto& tensor_product_u_int = outer_product(u_int, u_n_gamma_ov_2);
 
-        /*--- Loop over dofs ---*/
-        for(unsigned int i = 0; i < phi.dofs_per_component; ++i) {
-          for(unsigned int j = 0; j < phi.dofs_per_component; ++j)
-            phi.submit_dof_value(Tensor<1, dim, VectorizedArray<Number>>(), j); /*--- Set all dofs to zero ---*/
-          phi.submit_dof_value(tmp, i); /*--- Set dof i equal to one ---*/
-          phi.evaluate(true, true);
-
-          /*--- Loop over quadrature points ---*/
-          for(unsigned int q = 0; q < phi.n_q_points; ++q) {
-            const auto& u_int                = phi.get_value(q);
-            const auto& grad_u_int           = phi.get_gradient(q);
-            const auto& u_n_gamma_ov_2       = phi_old_extr.get_value(q);
-            const auto& tensor_product_u_int = outer_product(u_int, u_n_gamma_ov_2);
-
-            phi.submit_value(1.0/(gamma*dt)*u_int, q);
-            phi.submit_gradient(-a22*tensor_product_u_int + a22/Re*grad_u_int, q);
-          }
-          phi.integrate(true, true);
-          diagonal[i] = phi.get_dof_value(i);
-        }
-        for(unsigned int i = 0; i < phi.dofs_per_component; ++i)
-          phi.submit_dof_value(diagonal[i], i);
-        phi.distribute_local_to_global(dst);
+        phi.submit_value(1.0/(gamma*dt)*u_int, q);
+        phi.submit_gradient(-a22*tensor_product_u_int + a22/Re*grad_u_int, q);
       }
+      phi.integrate(EvaluationFlags::values | EvaluationFlags::gradients);
     }
     else {
-      FEEvaluation<dim, fe_degree_v, n_q_points_1d_v, dim, Number> phi(data, 0),
-                                                                   phi_int_extr(data, 0);
+      FEEvaluation<dim, fe_degree_v, n_q_points_1d_v, dim, Number, VectorizedArray<Number>>
+      phi_int_extr(phi.get_matrix_free(), 0);
 
-      AlignedVector<Tensor<1, dim, VectorizedArray<Number>>> diagonal(phi.dofs_per_component);
-      Tensor<1, dim, VectorizedArray<Number>> tmp;
-      for(unsigned int d = 0; d < dim; ++d)
-        tmp[d] = make_vectorized_array<Number>(1.0);
+      phi.evaluate(EvaluationFlags::values | EvaluationFlags::gradients);
+      phi_int_extr.reinit(phi.get_current_cell_index());
+      phi_int_extr.gather_evaluate(u_extr, EvaluationFlags::values);
 
-      /*--- Loop over cells in the range ---*/
-      for(unsigned int cell = cell_range.first; cell < cell_range.second; ++cell) {
-        phi_int_extr.reinit(cell);
-        phi_int_extr.gather_evaluate(u_extr, true, false);
-        phi.reinit(cell);
+      /*--- Loop over quadrature points ---*/
+      for(unsigned int q = 0; q < phi.n_q_points; ++q) {
+        const auto& u_curr                = phi.get_value(q);
+        const auto& grad_u_curr           = phi.get_gradient(q);
+        const auto& u_n1_int              = phi_int_extr.get_value(q);
+        const auto& tensor_product_u_curr = outer_product(u_curr, u_n1_int);
 
-        /*--- Loop over dofs ---*/
-        for(unsigned int i = 0; i < phi.dofs_per_component; ++i) {
-          for(unsigned int j = 0; j < phi.dofs_per_component; ++j)
-            phi.submit_dof_value(Tensor<1, dim, VectorizedArray<Number>>(), j);
-          phi.submit_dof_value(tmp, i);
-          phi.evaluate(true, true);
-
-          /*--- Loop over quadrature points ---*/
-          for(unsigned int q = 0; q < phi.n_q_points; ++q) {
-            const auto& u_curr                   = phi.get_value(q);
-            const auto& grad_u_curr              = phi.get_gradient(q);
-            const auto& u_n1_int                 = phi_int_extr.get_value(q);
-            const auto& tensor_product_u_curr    = outer_product(u_curr, u_n1_int);
-
-            phi.submit_value(1.0/((1.0 - gamma)*dt)*u_curr, q);
-            phi.submit_gradient(-a33*tensor_product_u_curr + a33/Re*grad_u_curr, q);
-          }
-          phi.integrate(true, true);
-          diagonal[i] = phi.get_dof_value(i);
-        }
-        for(unsigned int i = 0; i < phi.dofs_per_component; ++i)
-          phi.submit_dof_value(diagonal[i], i);
-        phi.distribute_local_to_global(dst);
+        phi.submit_value(1.0/((1.0 - gamma)*dt)*u_curr, q);
+        phi.submit_gradient(-a33*tensor_product_u_curr + a33/Re*grad_u_curr, q);
       }
+      phi.integrate(EvaluationFlags::values | EvaluationFlags::gradients);
     }
   }
 
@@ -1511,143 +1596,94 @@ namespace NS_TRBDF2 {
   //
   template<int dim, int fe_degree_p, int fe_degree_v, int n_q_points_1d_p, int n_q_points_1d_v, typename Vec>
   void NavierStokesProjectionOperator<dim, fe_degree_p, fe_degree_v, n_q_points_1d_p, n_q_points_1d_v, Vec>::
-  assemble_diagonal_face_term_velocity(const MatrixFree<dim, Number>&               data,
-                                       Vec&                                         dst,
-                                       const unsigned int&                          ,
-                                       const std::pair<unsigned int, unsigned int>& face_range) const {
+  assemble_diagonal_face_term_velocity(FEFaceEvaluation<dim,
+                                                        fe_degree_v,
+                                                        n_q_points_1d_v,
+                                                        dim,
+                                                        Number,
+                                                        VectorizedArray<Number>>& phi_p,
+                                       FEFaceEvaluation<dim,
+                                                        fe_degree_v,
+                                                        n_q_points_1d_v,
+                                                        dim,
+                                                        Number,
+                                                        VectorizedArray<Number>>& phi_m) const {
+    AssertDimension(phi_p.dofs_per_component, phi_m.dofs_per_component); /*--- We just assert for safety that dimension match,
+                                                                              in the sense that we have selected the proper
+                                                                              space ---*/
+
     if(TR_BDF2_stage == 1) {
-      FEFaceEvaluation<dim, fe_degree_v, n_q_points_1d_v, dim, Number> phi_p(data, true, 0),
-                                                                       phi_m(data, false, 0),
-                                                                       phi_old_extr_p(data, true, 0),
-                                                                       phi_old_extr_m(data, false, 0);
+      FEFaceEvaluation<dim, fe_degree_v, n_q_points_1d_v, dim, Number, VectorizedArray<Number>>
+      phi_old_extr_p(phi_p.get_matrix_free(), true, 0),
+      phi_old_extr_m(phi_m.get_matrix_free(), false, 0);
 
-      AssertDimension(phi_p.dofs_per_component, phi_m.dofs_per_component); /*--- We just assert for safety that dimension match,
-                                                                                in the sense that we have selected the proper
-                                                                                space ---*/
-      AlignedVector<Tensor<1, dim, VectorizedArray<Number>>> diagonal_p(phi_p.dofs_per_component),
-                                                             diagonal_m(phi_m.dofs_per_component);
-      Tensor<1, dim, VectorizedArray<Number>> tmp;
-      for(unsigned int d = 0; d < dim; ++d)
-        tmp[d] = make_vectorized_array<Number>(1.0); /*--- We build the usal vector of ones that we will use as dof value ---*/
+      const auto coef_jump = C_u*0.5*(std::abs((phi_p.get_normal_vector(0)*phi_p.inverse_jacobian(0))[dim - 1]) +
+                                      std::abs((phi_m.get_normal_vector(0)*phi_m.inverse_jacobian(0))[dim - 1]));
 
-      /*--- Now we loop over faces ---*/
-      for(unsigned int face = face_range.first; face < face_range.second; ++face) {
-        phi_old_extr_p.reinit(face);
-        phi_old_extr_p.gather_evaluate(u_extr, true, false);
-        phi_old_extr_m.reinit(face);
-        phi_old_extr_m.gather_evaluate(u_extr, true, false);
-        phi_p.reinit(face);
-        phi_m.reinit(face);
 
-        const auto coef_jump = C_u*0.5*(std::abs((phi_p.get_normal_vector(0)*phi_p.inverse_jacobian(0))[dim - 1]) +
-                                        std::abs((phi_m.get_normal_vector(0)*phi_m.inverse_jacobian(0))[dim - 1]));
+      phi_p.evaluate(EvaluationFlags::values | EvaluationFlags::gradients);
+      phi_m.evaluate(EvaluationFlags::values | EvaluationFlags::gradients);
+      phi_old_extr_p.reinit(phi_p.get_current_cell_index());
+      phi_old_extr_p.gather_evaluate(u_extr, EvaluationFlags::values);
+      phi_old_extr_m.reinit(phi_m.get_current_cell_index());
+      phi_old_extr_m.gather_evaluate(u_extr, EvaluationFlags::values);
 
-        /*--- Loop over dofs. We will set all equal to zero apart from the current one ---*/
-        for(unsigned int i = 0; i < phi_p.dofs_per_component; ++i) {
-          for(unsigned int j = 0; j < phi_p.dofs_per_component; ++j) {
-            phi_p.submit_dof_value(Tensor<1, dim, VectorizedArray<Number>>(), j);
-            phi_m.submit_dof_value(Tensor<1, dim, VectorizedArray<Number>>(), j);
-          }
-          phi_p.submit_dof_value(tmp, i);
-          phi_p.evaluate(true, true);
-          phi_m.submit_dof_value(tmp, i);
-          phi_m.evaluate(true, true);
+      /*--- Loop over quadrature points to compute the integral ---*/
+      for(unsigned int q = 0; q < phi_p.n_q_points; ++q) {
+        const auto& n_plus                   = phi_p.get_normal_vector(q);
+        const auto& avg_grad_u_int           = 0.5*(phi_p.get_gradient(q) + phi_m.get_gradient(q));
+        const auto& jump_u_int               = phi_p.get_value(q) - phi_m.get_value(q);
+        const auto& avg_tensor_product_u_int = 0.5*(outer_product(phi_p.get_value(q), phi_old_extr_p.get_value(q)) +
+                                                    outer_product(phi_m.get_value(q), phi_old_extr_m.get_value(q)));
+        const auto& lambda                   = std::max(std::abs(scalar_product(phi_old_extr_p.get_value(q), n_plus)),
+                                                        std::abs(scalar_product(phi_old_extr_m.get_value(q), n_plus)));
 
-          /*--- Loop over quadrature points to compute the integral ---*/
-          for(unsigned int q = 0; q < phi_p.n_q_points; ++q) {
-            const auto& n_plus                   = phi_p.get_normal_vector(q);
-            const auto& avg_grad_u_int           = 0.5*(phi_p.get_gradient(q) + phi_m.get_gradient(q));
-            const auto& jump_u_int               = phi_p.get_value(q) - phi_m.get_value(q);
-            const auto& avg_tensor_product_u_int = 0.5*(outer_product(phi_p.get_value(q), phi_old_extr_p.get_value(q)) +
-                                                        outer_product(phi_m.get_value(q), phi_old_extr_m.get_value(q)));
-            const auto  lambda                   = std::max(std::abs(scalar_product(phi_old_extr_p.get_value(q), n_plus)),
-                                                            std::abs(scalar_product(phi_old_extr_m.get_value(q), n_plus)));
-
-            phi_p.submit_value(a22/Re*(-avg_grad_u_int*n_plus + coef_jump*jump_u_int) +
-                               a22*avg_tensor_product_u_int*n_plus + 0.5*a22*lambda*jump_u_int , q);
-            phi_m.submit_value(-a22/Re*(-avg_grad_u_int*n_plus + coef_jump*jump_u_int) -
-                               a22*avg_tensor_product_u_int*n_plus - 0.5*a22*lambda*jump_u_int, q);
-            phi_p.submit_normal_derivative(-theta_v*0.5*a22/Re*jump_u_int, q);
-            phi_m.submit_normal_derivative(-theta_v*0.5*a22/Re*jump_u_int, q);
-          }
-          phi_p.integrate(true, true);
-          diagonal_p[i] = phi_p.get_dof_value(i);
-          phi_m.integrate(true, true);
-          diagonal_m[i] = phi_m.get_dof_value(i);
-        }
-        for(unsigned int i = 0; i < phi_p.dofs_per_component; ++i) {
-          phi_p.submit_dof_value(diagonal_p[i], i);
-          phi_m.submit_dof_value(diagonal_m[i], i);
-        }
-        phi_p.distribute_local_to_global(dst);
-        phi_m.distribute_local_to_global(dst);
+        phi_p.submit_value(a22/Re*(-avg_grad_u_int*n_plus + coef_jump*jump_u_int) +
+                           a22*avg_tensor_product_u_int*n_plus + 0.5*a22*lambda*jump_u_int , q);
+        phi_m.submit_value(-a22/Re*(-avg_grad_u_int*n_plus + coef_jump*jump_u_int) -
+                           a22*avg_tensor_product_u_int*n_plus - 0.5*a22*lambda*jump_u_int, q);
+        phi_p.submit_normal_derivative(-theta_v*0.5*a22/Re*jump_u_int, q);
+        phi_m.submit_normal_derivative(-theta_v*0.5*a22/Re*jump_u_int, q);
       }
+      phi_p.integrate(EvaluationFlags::values | EvaluationFlags::gradients);
+      phi_m.integrate(EvaluationFlags::values | EvaluationFlags::gradients);
     }
     else {
-      FEFaceEvaluation<dim, fe_degree_v, n_q_points_1d_v, dim, Number> phi_p(data, true, 0),
-                                                                       phi_m(data, false, 0),
-                                                                       phi_extr_p(data, true, 0),
-                                                                       phi_extr_m(data, false, 0);
+      FEFaceEvaluation<dim, fe_degree_v, n_q_points_1d_v, dim, Number, VectorizedArray<Number>>
+      phi_extr_p(phi_p.get_matrix_free(), true, 0),
+      phi_extr_m(phi_m.get_matrix_free(), false, 0);
 
-      AssertDimension(phi_p.dofs_per_component, phi_m.dofs_per_component);
-      AlignedVector<Tensor<1, dim, VectorizedArray<Number>>> diagonal_p(phi_p.dofs_per_component),
-                                                             diagonal_m(phi_m.dofs_per_component);
-      Tensor<1, dim, VectorizedArray<Number>> tmp;
-      for(unsigned int d = 0; d < dim; ++d)
-        tmp[d] = make_vectorized_array<Number>(1.0);
+      const auto coef_jump = C_u*0.5*(std::abs((phi_p.get_normal_vector(0)*phi_p.inverse_jacobian(0))[dim - 1]) +
+                                      std::abs((phi_m.get_normal_vector(0)*phi_m.inverse_jacobian(0))[dim - 1]));
 
-      /*--- Now we loop over faces ---*/
-      for(unsigned int face = face_range.first; face < face_range.second; ++face) {
-        phi_extr_p.reinit(face);
-        phi_extr_p.gather_evaluate(u_extr, true, false);
-        phi_extr_m.reinit(face);
-        phi_extr_m.gather_evaluate(u_extr, true, false);
-        phi_p.reinit(face);
-        phi_m.reinit(face);
 
-        const auto coef_jump = C_u*0.5*(std::abs((phi_p.get_normal_vector(0)*phi_p.inverse_jacobian(0))[dim - 1]) +
-                                        std::abs((phi_m.get_normal_vector(0)*phi_m.inverse_jacobian(0))[dim - 1]));
+      phi_p.evaluate(EvaluationFlags::values | EvaluationFlags::gradients);
+      phi_m.evaluate(EvaluationFlags::values | EvaluationFlags::gradients);
+      phi_extr_p.reinit(phi_p.get_current_cell_index());
+      phi_extr_p.gather_evaluate(u_extr, EvaluationFlags::values);
+      phi_extr_m.reinit(phi_m.get_current_cell_index());
+      phi_extr_m.gather_evaluate(u_extr, EvaluationFlags::values);
 
-        /*--- Loop over dofs. We will set all equal to zero apart from the current one ---*/
-        for(unsigned int i = 0; i < phi_p.dofs_per_component; ++i) {
-          for(unsigned int j = 0; j < phi_p.dofs_per_component; ++j) {
-            phi_p.submit_dof_value(Tensor<1, dim, VectorizedArray<Number>>(), j);
-            phi_m.submit_dof_value(Tensor<1, dim, VectorizedArray<Number>>(), j);
-          }
-          phi_p.submit_dof_value(tmp, i);
-          phi_p.evaluate(true, true);
-          phi_m.submit_dof_value(tmp, i);
-          phi_m.evaluate(true, true);
 
-          /*--- Loop over quadrature points to compute the integral ---*/
-          for(unsigned int q = 0; q < phi_p.n_q_points; ++q) {
-            const auto& n_plus               = phi_p.get_normal_vector(q);
-            const auto& avg_grad_u           = 0.5*(phi_p.get_gradient(q) + phi_m.get_gradient(q));
-            const auto& jump_u               = phi_p.get_value(q) - phi_m.get_value(q);
-            const auto& avg_tensor_product_u = 0.5*(outer_product(phi_p.get_value(q), phi_extr_p.get_value(q)) +
-                                                    outer_product(phi_m.get_value(q), phi_extr_m.get_value(q)));
-            const auto  lambda               = std::max(std::abs(scalar_product(phi_extr_p.get_value(q), n_plus)),
-                                                        std::abs(scalar_product(phi_extr_m.get_value(q), n_plus)));
+      /*--- Loop over quadrature points to compute the integral ---*/
+      for(unsigned int q = 0; q < phi_p.n_q_points; ++q) {
+        const auto& n_plus               = phi_p.get_normal_vector(q);
+        const auto& avg_grad_u           = 0.5*(phi_p.get_gradient(q) + phi_m.get_gradient(q));
+        const auto& jump_u               = phi_p.get_value(q) - phi_m.get_value(q);
+        const auto& avg_tensor_product_u = 0.5*(outer_product(phi_p.get_value(q), phi_extr_p.get_value(q)) +
+                                                outer_product(phi_m.get_value(q), phi_extr_m.get_value(q)));
+        const auto& lambda               = std::max(std::abs(scalar_product(phi_extr_p.get_value(q), n_plus)),
+                                                    std::abs(scalar_product(phi_extr_m.get_value(q), n_plus)));
 
-            phi_p.submit_value(a33/Re*(-avg_grad_u*n_plus + coef_jump*jump_u) +
-                               a33*avg_tensor_product_u*n_plus + 0.5*a33*lambda*jump_u, q);
-            phi_m.submit_value(-a33/Re*(-avg_grad_u*n_plus + coef_jump*jump_u) -
-                               a33*avg_tensor_product_u*n_plus - 0.5*a33*lambda*jump_u, q);
-            phi_p.submit_normal_derivative(-theta_v*0.5*a33/Re*jump_u, q);
-            phi_m.submit_normal_derivative(-theta_v*0.5*a33/Re*jump_u, q);
-          }
-          phi_p.integrate(true, true);
-          diagonal_p[i] = phi_p.get_dof_value(i);
-          phi_m.integrate(true, true);
-          diagonal_m[i] = phi_m.get_dof_value(i);
-        }
-        for(unsigned int i = 0; i < phi_p.dofs_per_component; ++i) {
-          phi_p.submit_dof_value(diagonal_p[i], i);
-          phi_m.submit_dof_value(diagonal_m[i], i);
-        }
-        phi_p.distribute_local_to_global(dst);
-        phi_m.distribute_local_to_global(dst);
+        phi_p.submit_value(a33/Re*(-avg_grad_u*n_plus + coef_jump*jump_u) +
+                           a33*avg_tensor_product_u*n_plus + 0.5*a33*lambda*jump_u, q);
+        phi_m.submit_value(-a33/Re*(-avg_grad_u*n_plus + coef_jump*jump_u) -
+                           a33*avg_tensor_product_u*n_plus - 0.5*a33*lambda*jump_u, q);
+        phi_p.submit_normal_derivative(-theta_v*0.5*a33/Re*jump_u, q);
+        phi_m.submit_normal_derivative(-theta_v*0.5*a33/Re*jump_u, q);
       }
+      phi_p.integrate(EvaluationFlags::values | EvaluationFlags::gradients);
+      phi_m.integrate(EvaluationFlags::values | EvaluationFlags::gradients);
     }
   }
 
@@ -1656,188 +1692,126 @@ namespace NS_TRBDF2 {
   //
   template<int dim, int fe_degree_p, int fe_degree_v, int n_q_points_1d_p, int n_q_points_1d_v, typename Vec>
   void NavierStokesProjectionOperator<dim, fe_degree_p, fe_degree_v, n_q_points_1d_p, n_q_points_1d_v, Vec>::
-  assemble_diagonal_boundary_term_velocity(const MatrixFree<dim, Number>&               data,
-                                           Vec&                                         dst,
-                                           const unsigned int&                          ,
-                                           const std::pair<unsigned int, unsigned int>& face_range) const {
+  assemble_diagonal_boundary_term_velocity(FEFaceEvaluation<dim,
+                                                            fe_degree_v,
+                                                            n_q_points_1d_v,
+                                                            dim,
+                                                            Number,
+                                                            VectorizedArray<Number>>& phi) const {
     if(TR_BDF2_stage == 1) {
-      FEFaceEvaluation<dim, fe_degree_v, n_q_points_1d_v, dim, Number> phi(data, true, 0),
-                                                                       phi_old_extr(data, true, 0);
+      FEFaceEvaluation<dim, fe_degree_v, n_q_points_1d_v, dim, Number, VectorizedArray<Number>>
+      phi_old_extr(phi.get_matrix_free(), true, 0);
 
-      AlignedVector<Tensor<1, dim, VectorizedArray<Number>>> diagonal(phi.dofs_per_component);
-      Tensor<1, dim, VectorizedArray<Number>> tmp;
-      for(unsigned int d = 0; d < dim; ++d)
-        tmp[d] = make_vectorized_array<Number>(1.0);
+      phi.evaluate(EvaluationFlags::values | EvaluationFlags::gradients);
+      phi_old_extr.reinit(phi.get_current_cell_index());
+      phi_old_extr.gather_evaluate(u_extr, EvaluationFlags::values);
 
-      /*--- Loop over all faces in the range ---*/
-      for(unsigned int face = face_range.first; face < face_range.second; ++face) {
-        phi_old_extr.reinit(face);
-        phi_old_extr.gather_evaluate(u_extr, true, false);
-        phi.reinit(face);
+      const auto boundary_id = phi.get_matrix_free().get_boundary_id(phi.get_current_cell_index());
+      const auto coef_jump   = C_u*std::abs((phi.get_normal_vector(0) * phi.inverse_jacobian(0))[dim - 1]);
 
-        const auto boundary_id = data.get_boundary_id(face);
-        const auto coef_jump   = C_u*std::abs((phi.get_normal_vector(0) * phi.inverse_jacobian(0))[dim - 1]);
+      if(boundary_id != 1) {
+        const double coef_trasp = 0.0;
 
-        if(boundary_id != 1) {
-          const double coef_trasp = 0.0;
+        /*--- Loop over quadrature points to compute the integral ---*/
+        for(unsigned int q = 0; q < phi.n_q_points; ++q) {
+          const auto& n_plus               = phi.get_normal_vector(q);
+          const auto& grad_u_int           = phi.get_gradient(q);
+          const auto& u_int                = phi.get_value(q);
+          const auto& tensor_product_u_int = outer_product(phi.get_value(q), phi_old_extr.get_value(q));
+          const auto& lambda               = std::abs(scalar_product(phi_old_extr.get_value(q), n_plus));
 
-          /*--- Loop over all dofs ---*/
-          for(unsigned int i = 0; i < phi.dofs_per_component; ++i) {
-            for(unsigned int j = 0; j < phi.dofs_per_component; ++j)
-              phi.submit_dof_value(Tensor<1, dim, VectorizedArray<Number>>(), j);
-            phi.submit_dof_value(tmp, i);
-            phi.evaluate(true, true);
-
-            /*--- Loop over quadrature points to compute the integral ---*/
-            for(unsigned int q = 0; q < phi.n_q_points; ++q) {
-              const auto& n_plus               = phi.get_normal_vector(q);
-              const auto& grad_u_int           = phi.get_gradient(q);
-              const auto& u_int                = phi.get_value(q);
-              const auto& tensor_product_u_int = outer_product(phi.get_value(q), phi_old_extr.get_value(q));
-              const auto& lambda               = std::abs(scalar_product(phi_old_extr.get_value(q), n_plus));
-
-              phi.submit_value(a22/Re*(-grad_u_int*n_plus + 2.0*coef_jump*u_int) +
-                               a22*coef_trasp*tensor_product_u_int*n_plus + a22*lambda*u_int, q);
-              phi.submit_normal_derivative(-theta_v*a22/Re*u_int, q);
-            }
-            phi.integrate(true, true);
-            diagonal[i] = phi.get_dof_value(i);
-          }
-          for(unsigned int i = 0; i < phi.dofs_per_component; ++i)
-            phi.submit_dof_value(diagonal[i], i);
-          phi.distribute_local_to_global(dst);
+          phi.submit_value(a22/Re*(-grad_u_int*n_plus + 2.0*coef_jump*u_int) +
+                           a22*coef_trasp*tensor_product_u_int*n_plus + a22*lambda*u_int, q);
+          phi.submit_normal_derivative(-theta_v*a22/Re*u_int, q);
         }
-        else {
-          /*--- Loop over all dofs ---*/
-          for(unsigned int i = 0; i < phi.dofs_per_component; ++i) {
-            for(unsigned int j = 0; j < phi.dofs_per_component; ++j)
-              phi.submit_dof_value(Tensor<1, dim, VectorizedArray<Number>>(), j);
-            phi.submit_dof_value(tmp, i);
-            phi.evaluate(true, true);
+        phi.integrate(EvaluationFlags::values | EvaluationFlags::gradients);
+      }
+      else {
+        /*--- Loop over quadrature points to compute the integral ---*/
+        for(unsigned int q = 0; q < phi.n_q_points; ++q) {
+          const auto& n_plus               = phi.get_normal_vector(q);
+          const auto& grad_u_int           = phi.get_gradient(q);
+          const auto& u_int                = phi.get_value(q);
+          const auto& lambda               = std::abs(scalar_product(phi_old_extr.get_value(q), n_plus));
 
-            /*--- Loop over quadrature points to compute the integral ---*/
-            for(unsigned int q = 0; q < phi.n_q_points; ++q) {
-              const auto& n_plus               = phi.get_normal_vector(q);
-              const auto& grad_u_int           = phi.get_gradient(q);
-              const auto& u_int                = phi.get_value(q);
-              const auto& lambda               = std::abs(scalar_product(phi_old_extr.get_value(q), n_plus));
+          const auto& point_vectorized     = phi.quadrature_point(q);
+          auto u_int_m                     = u_int;
+          auto grad_u_int_m                = grad_u_int;
+          for(unsigned int v = 0; v < VectorizedArray<Number>::size(); ++v) {
+            Point<dim> point;
+            for(unsigned int d = 0; d < dim; ++d)
+              point[d] = point_vectorized[d][v];
 
-              const auto& point_vectorized     = phi.quadrature_point(q);
-              auto u_int_m                     = u_int;
-              auto grad_u_int_m                = grad_u_int;
-              for(unsigned int v = 0; v < VectorizedArray<Number>::size(); ++v) {
-                Point<dim> point;
-                for(unsigned int d = 0; d < dim; ++d)
-                  point[d] = point_vectorized[d][v];
+            u_int_m[1][v] = -u_int_m[1][v];
 
-                u_int_m[1][v] = -u_int_m[1][v];
-
-                grad_u_int_m[0][0][v] = -grad_u_int_m[0][0][v];
-                grad_u_int_m[0][1][v] = -grad_u_int_m[0][1][v];
-              }
-
-              phi.submit_value(a22/Re*(-(0.5*(grad_u_int + grad_u_int_m))*n_plus + coef_jump*(u_int - u_int_m)) +
-                               a22*outer_product(0.5*(u_int + u_int_m), phi_old_extr.get_value(q))*n_plus +
-                               a22*0.5*lambda*(u_int - u_int_m), q);
-              phi.submit_normal_derivative(-theta_v*a22/Re*(u_int - u_int_m), q);
-            }
-            phi.integrate(true, true);
-            diagonal[i] = phi.get_dof_value(i);
+            grad_u_int_m[0][0][v] = -grad_u_int_m[0][0][v];
+            grad_u_int_m[0][1][v] = -grad_u_int_m[0][1][v];
           }
-          for(unsigned int i = 0; i < phi.dofs_per_component; ++i)
-            phi.submit_dof_value(diagonal[i], i);
-          phi.distribute_local_to_global(dst);
+
+          phi.submit_value(a22/Re*(-(0.5*(grad_u_int + grad_u_int_m))*n_plus + coef_jump*(u_int - u_int_m)) +
+                           a22*outer_product(0.5*(u_int + u_int_m), phi_old_extr.get_value(q))*n_plus +
+                           a22*0.5*lambda*(u_int - u_int_m), q);
+          phi.submit_normal_derivative(-theta_v*a22/Re*(u_int - u_int_m), q);
         }
+        phi.integrate(EvaluationFlags::values | EvaluationFlags::gradients);
       }
     }
     else {
-      FEFaceEvaluation<dim, fe_degree_v, n_q_points_1d_v, dim, Number> phi(data, true, 0),
-                                                                       phi_extr(data, true, 0);
+      FEFaceEvaluation<dim, fe_degree_v, n_q_points_1d_v, dim, Number, VectorizedArray<Number>>
+      phi_extr(phi.get_matrix_free(), true, 0);
 
-      AlignedVector<Tensor<1, dim, VectorizedArray<Number>>> diagonal(phi.dofs_per_component);
-      Tensor<1, dim, VectorizedArray<Number>> tmp;
-      for(unsigned int d = 0; d < dim; ++d)
-        tmp[d] = make_vectorized_array<Number>(1.0);
+      phi.evaluate(EvaluationFlags::values | EvaluationFlags::gradients);
+      phi_extr.reinit(phi.get_current_cell_index());
+      phi_extr.gather_evaluate(u_extr, EvaluationFlags::values);
 
-      /*--- Loop over all faces in the range ---*/
-      for(unsigned int face = face_range.first; face < face_range.second; ++face) {
-        phi_extr.reinit(face);
-        phi_extr.gather_evaluate(u_extr, true, false);
-        phi.reinit(face);
+      const auto boundary_id = phi.get_matrix_free().get_boundary_id(phi.get_current_cell_index());
+      const auto coef_jump   = C_u*std::abs((phi.get_normal_vector(0) * phi.inverse_jacobian(0))[dim - 1]);
 
-        const auto boundary_id = data.get_boundary_id(face);
-        const auto coef_jump   = C_u*std::abs((phi.get_normal_vector(0) * phi.inverse_jacobian(0))[dim - 1]);
+      if(boundary_id != 1) {
+        const double coef_trasp = 0.0;
 
-        if(boundary_id != 1) {
-          const double coef_trasp = 0.0;
+        /*--- Loop over quadrature points to compute the integral ---*/
+        for(unsigned int q = 0; q < phi.n_q_points; ++q) {
+          const auto& n_plus           = phi.get_normal_vector(q);
+          const auto& grad_u           = phi.get_gradient(q);
+          const auto& u                = phi.get_value(q);
+          const auto& tensor_product_u = outer_product(phi.get_value(q), phi_extr.get_value(q));
+          const auto& lambda           = std::abs(scalar_product(phi_extr.get_value(q), n_plus));
 
-          /*--- Loop over all dofs ---*/
-          for(unsigned int i = 0; i < phi.dofs_per_component; ++i) {
-            for(unsigned int j = 0; j < phi.dofs_per_component; ++j)
-              phi.submit_dof_value(Tensor<1, dim, VectorizedArray<Number>>(), j);
-            phi.submit_dof_value(tmp, i);
-            phi.evaluate(true, true);
-
-            /*--- Loop over quadrature points to compute the integral ---*/
-            for(unsigned int q = 0; q < phi.n_q_points; ++q) {
-              const auto& n_plus           = phi.get_normal_vector(q);
-              const auto& grad_u           = phi.get_gradient(q);
-              const auto& u                = phi.get_value(q);
-              const auto& tensor_product_u = outer_product(phi.get_value(q), phi_extr.get_value(q));
-              const auto& lambda           = std::abs(scalar_product(phi_extr.get_value(q), n_plus));
-
-              phi.submit_value(a33/Re*(-grad_u*n_plus + 2.0*coef_jump*u) +
-                               a33*coef_trasp*tensor_product_u*n_plus + a33*lambda*u, q);
-              phi.submit_normal_derivative(-theta_v*a33/Re*u, q);
-            }
-            phi.integrate(true, true);
-            diagonal[i] = phi.get_dof_value(i);
-          }
-          for(unsigned int i = 0; i < phi.dofs_per_component; ++i)
-            phi.submit_dof_value(diagonal[i], i);
-          phi.distribute_local_to_global(dst);
+          phi.submit_value(a33/Re*(-grad_u*n_plus + 2.0*coef_jump*u) +
+                           a33*coef_trasp*tensor_product_u*n_plus + a33*lambda*u, q);
+          phi.submit_normal_derivative(-theta_v*a33/Re*u, q);
         }
-        else {
-          /*--- Loop over all dofs ---*/
-          for(unsigned int i = 0; i < phi.dofs_per_component; ++i) {
-            for(unsigned int j = 0; j < phi.dofs_per_component; ++j)
-              phi.submit_dof_value(Tensor<1, dim, VectorizedArray<Number>>(), j);
-            phi.submit_dof_value(tmp, i);
-            phi.evaluate(true, true);
+        phi.integrate(EvaluationFlags::values | EvaluationFlags::gradients);
+      }
+      else {
+        /*--- Loop over quadrature points to compute the integral ---*/
+        for(unsigned int q = 0; q < phi.n_q_points; ++q) {
+          const auto& n_plus           = phi.get_normal_vector(q);
+          const auto& grad_u           = phi.get_gradient(q);
+          const auto& u                = phi.get_value(q);
+          const auto& lambda           = std::abs(scalar_product(phi_extr.get_value(q), n_plus));
 
-            /*--- Loop over quadrature points to compute the integral ---*/
-            for(unsigned int q = 0; q < phi.n_q_points; ++q) {
-              const auto& n_plus           = phi.get_normal_vector(q);
-              const auto& grad_u           = phi.get_gradient(q);
-              const auto& u                = phi.get_value(q);
-              const auto& lambda           = std::abs(scalar_product(phi_extr.get_value(q), n_plus));
+          const auto& point_vectorized = phi.quadrature_point(q);
+          auto u_m                     = u;
+          auto grad_u_m                = grad_u;
+          for(unsigned int v = 0; v < VectorizedArray<Number>::size(); ++v) {
+            Point<dim> point;
+            for(unsigned int d = 0; d < dim; ++d)
+              point[d] = point_vectorized[d][v];
 
-              const auto& point_vectorized = phi.quadrature_point(q);
-              auto u_m                     = u;
-              auto grad_u_m                = grad_u;
-              for(unsigned int v = 0; v < VectorizedArray<Number>::size(); ++v) {
-                Point<dim> point;
-                for(unsigned int d = 0; d < dim; ++d)
-                  point[d] = point_vectorized[d][v];
+            u_m[1][v] = -u_m[1][v];
 
-                u_m[1][v] = -u_m[1][v];
-
-                grad_u_m[0][0][v] = -grad_u_m[0][0][v];
-                grad_u_m[0][1][v] = -grad_u_m[0][1][v];
-              }
-
-              phi.submit_value(a33/Re*(-(0.5*(grad_u + grad_u_m))*n_plus + coef_jump*(u - u_m)) +
-                               a33*outer_product(0.5*(u + u_m), phi_extr.get_value(q))*n_plus +
-                               a33*0.5*lambda*(u - u_m), q);
-              phi.submit_normal_derivative(-theta_v*a33/Re*(u - u_m), q);
-            }
-            phi.integrate(true, true);
-            diagonal[i] = phi.get_dof_value(i);
+            grad_u_m[0][0][v] = -grad_u_m[0][0][v];
+            grad_u_m[0][1][v] = -grad_u_m[0][1][v];
           }
-          for(unsigned int i = 0; i < phi.dofs_per_component; ++i)
-            phi.submit_dof_value(diagonal[i], i);
-          phi.distribute_local_to_global(dst);
+
+          phi.submit_value(a33/Re*(-(0.5*(grad_u + grad_u_m))*n_plus + coef_jump*(u - u_m)) +
+                           a33*outer_product(0.5*(u + u_m), phi_extr.get_value(q))*n_plus +
+                           a33*0.5*lambda*(u - u_m), q);
+          phi.submit_normal_derivative(-theta_v*a33/Re*(u - u_m), q);
         }
+        phi.integrate(EvaluationFlags::values | EvaluationFlags::gradients);
       }
     }
   }
@@ -2011,34 +1985,25 @@ namespace NS_TRBDF2 {
     auto& inverse_diagonal = this->inverse_diagonal_entries->get_vector();
 
     if(NS_stage == 1) {
-      MatrixFreeTools::compute_diagonal<dim, Number, VectorizedArray<Number>>
+      MatrixFreeTools::compute_diagonal<dim, fe_degree_v, n_q_points_1d_v, dim, Number, VectorizedArray<Number>>
       (*(this->data),
        inverse_diagonal,
-       [&](const auto& data, auto& dst, const auto& src, const auto& cell_range) {
-         (this->assemble_diagonal_cell_term_velocity)(data, dst, src, cell_range);
-       },
-       [&](const auto& data, auto& dst, const auto& src, const auto& face_range) {
-         (this->assemble_diagonal_face_term_velocity)(data, dst, src, face_range);
-       },
-       [&](const auto& data, auto& dst, const auto& src, const auto& boundary_range) {
-         (this->assemble_diagonal_boundary_term_velocity)(data, dst, src, boundary_range);
-       },
+       [&](auto& feeval_cell){(this->assemble_diagonal_cell_term_velocity)(feeval_cell);},
+       [&](auto& feeval_face_p, auto& feeval_face_m){(this->assemble_diagonal_face_term_velocity)(feeval_face_p, feeval_face_m);},
+       [&](auto& feeval_boundary){(this->assemble_diagonal_boundary_term_velocity)(feeval_boundary);},
+       0,
        0);
     }
     else if(NS_stage == 2) {
-      MatrixFreeTools::compute_diagonal<dim, Number, VectorizedArray<Number>>
-      (*(this->data),
-       inverse_diagonal,
-       [&](const auto& data, auto& dst, const auto& src, const auto& cell_range) {
-         (this->assemble_diagonal_cell_term_pressure)(data, dst, src, cell_range);
-       },
-       [&](const auto& data, auto& dst, const auto& src, const auto& face_range) {
-         (this->assemble_diagonal_face_term_pressure)(data, dst, src, face_range);
-       },
-       [&](const auto& data, auto& dst, const auto& src, const auto& boundary_range) {
-         (this->assemble_diagonal_boundary_term_pressure)(data, dst, src, boundary_range);
-       },
-       1);
+      this->data->initialize_dof_vector(inverse_diagonal, 1);
+      const unsigned int dummy = 0;
+
+      this->data->loop(&NavierStokesProjectionOperator::assemble_diagonal_cell_term_pressure,
+                       &NavierStokesProjectionOperator::assemble_diagonal_face_term_pressure,
+                       &NavierStokesProjectionOperator::assemble_diagonal_boundary_term_pressure,
+                       this, inverse_diagonal, dummy, false,
+                       MatrixFree<dim, Number>::DataAccessOnFaces::unspecified,
+                       MatrixFree<dim, Number>::DataAccessOnFaces::unspecified);
     }
 
     for(unsigned int i = 0; i < inverse_diagonal.locally_owned_size(); ++i) {
