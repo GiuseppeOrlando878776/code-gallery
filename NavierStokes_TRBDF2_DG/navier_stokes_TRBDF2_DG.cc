@@ -67,6 +67,17 @@
 namespace MatrixFreeTools {
   using namespace dealii;
 
+  template<typename UnitBlock, int n_components, typename VectorizedArrayType>
+  inline typename std::enable_if<n_components == 1, void>::type create_unitblock(UnitBlock& tmp) {
+    tmp = VectorizedArrayType(1.0);
+  }
+
+  template<typename UnitBlock, int n_components, typename VectorizedArrayType>
+  inline typename std::enable_if<n_components != 1, void>::type create_unitblock(UnitBlock& tmp) {
+    for(unsigned int d = 0; d < n_components; ++d)
+      tmp[d] = VectorizedArrayType(1.0);
+  }
+
   template<int dim, int fe_degree, int n_q_points_1d, int n_components, typename Number, typename VectorizedArrayType>
   void compute_diagonal(const MatrixFree<dim, Number, VectorizedArrayType>&            matrix_free,
                         LinearAlgebra::distributed::Vector<Number>&                    diagonal_global,
@@ -94,15 +105,19 @@ namespace MatrixFreeTools {
                                                                   n_components,
                                                                   Number,
                                                                   VectorizedArrayType>&)>& local_vmult_boundary,
-                        const unsigned int                                             dof_no = 0,
-                        const unsigned int                                             quad_no = 0,
-                        const unsigned int                                             first_selected_component = 0) {
+                        const unsigned int                                                 dof_no = 0,
+                        const unsigned int                                                 quad_no = 0,
+                        const unsigned int                                                 first_selected_component = 0) {
     using VectorType = LinearAlgebra::distributed::Vector<Number>;
 
     // initialize vector
     matrix_free.initialize_dof_vector(diagonal_global, dof_no);
 
     int dummy = 0;
+
+    typedef typename std::conditional<n_components == 1,
+                                      VectorizedArrayType,
+                                      Tensor<1, n_components, VectorizedArrayType>>::type UnitBlock;
 
     matrix_free.template loop<VectorType, int>(
       [&](const MatrixFree<dim, Number, VectorizedArrayType>& matrix_free,
@@ -112,20 +127,10 @@ namespace MatrixFreeTools {
             FEEvaluation<dim, fe_degree, n_q_points_1d, n_components, Number, VectorizedArrayType>
             phi(matrix_free, cell_range, dof_no, quad_no, first_selected_component);
 
-            typedef typename std::conditional<n_components == 1,
-                                              VectorizedArrayType,
-                                              Tensor<1, n_components, VectorizedArrayType>>::type UnitBlock;
-
             AlignedVector<UnitBlock> diagonal(phi.dofs_per_component);
 
             UnitBlock tmp;
-            if(n_components == 1) {
-              tmp = VectorizedArrayType(1.0);
-            }
-            else {
-              for(unsigned int d = 0; d < n_components; ++d)
-                tmp[d] = VectorizedArrayType(1.0);
-            }
+            create_unitblock<UnitBlock, n_components, VectorizedArrayType>(tmp);
 
             for(unsigned int cell = cell_range.first; cell < cell_range.second; ++cell) {
               phi.reinit(cell);
@@ -151,21 +156,11 @@ namespace MatrixFreeTools {
             phi_p(matrix_free, face_range, true, dof_no, quad_no, first_selected_component),
             phi_m(matrix_free, face_range, false, dof_no, quad_no, first_selected_component);
 
-            typedef typename std::conditional<n_components == 1,
-                                              VectorizedArrayType,
-                                              Tensor<1, n_components, VectorizedArrayType>>::type UnitBlock;
-
             AlignedVector<UnitBlock> diagonal_p(phi_p.dofs_per_component),
                                      diagonal_m(phi_m.dofs_per_component);
 
             UnitBlock tmp;
-            if(n_components == 1) {
-              tmp = VectorizedArrayType(1.0);
-            }
-            else {
-              for(unsigned int d = 0; d < n_components; ++d)
-                tmp[d] = VectorizedArrayType(1.0);
-            }
+            create_unitblock<UnitBlock, n_components, VectorizedArrayType>(tmp);
 
             for(unsigned int face = face_range.first; face < face_range.second; ++face) {
               phi_p.reinit(face);
@@ -198,20 +193,10 @@ namespace MatrixFreeTools {
             FEFaceEvaluation<dim, fe_degree, n_q_points_1d, n_components, Number, VectorizedArrayType>
             phi(matrix_free, boundary_range, true, dof_no, quad_no, first_selected_component);
 
-            typedef typename std::conditional<n_components == 1,
-                                              VectorizedArrayType,
-                                              Tensor<1, n_components, VectorizedArrayType>>::type UnitBlock;
-
             AlignedVector<UnitBlock> diagonal(phi.dofs_per_component);
 
             UnitBlock tmp;
-            if(n_components == 1) {
-              tmp = VectorizedArrayType(1.0);
-            }
-            else {
-              for(unsigned int d = 0; d < n_components; ++d)
-                tmp[d] = VectorizedArrayType(1.0);
-            }
+            create_unitblock<UnitBlock, n_components, VectorizedArrayType>(tmp);
 
             for(unsigned int face = boundary_range.first; face < boundary_range.second; ++face) {
               phi.reinit(face);
@@ -515,18 +500,30 @@ namespace NS_TRBDF2 {
                                                                    Number,
                                                                    VectorizedArray<Number>>& phi) const;
 
-    void assemble_diagonal_cell_term_pressure(const MatrixFree<dim, Number>&               data,
-                                              Vec&                                         dst,
-                                              const unsigned int&                          src,
-                                              const std::pair<unsigned int, unsigned int>& cell_range) const;
-    void assemble_diagonal_face_term_pressure(const MatrixFree<dim, Number>&               data,
-                                              Vec&                                         dst,
-                                              const unsigned int&                          src,
-                                              const std::pair<unsigned int, unsigned int>& face_range) const;
-    void assemble_diagonal_boundary_term_pressure(const MatrixFree<dim, Number>&               data,
-                                                  Vec&                                         dst,
-                                                  const unsigned int&                          src,
-                                                  const std::pair<unsigned int, unsigned int>& face_range) const;
+    void assemble_diagonal_cell_term_pressure(FEEvaluation<dim,
+                                                           fe_degree_p,
+                                                           n_q_points_1d_p,
+                                                           1,
+                                                           Number,
+                                                           VectorizedArray<Number>>& phi) const;
+    void assemble_diagonal_face_term_pressure(FEFaceEvaluation<dim,
+                                                               fe_degree_p,
+                                                               n_q_points_1d_p,
+                                                               1,
+                                                               Number,
+                                                               VectorizedArray<Number>>& phi_p,
+                                              FEFaceEvaluation<dim,
+                                                               fe_degree_p,
+                                                               n_q_points_1d_p,
+                                                               1,
+                                                               Number,
+                                                               VectorizedArray<Number>>& phi_m) const;
+    void assemble_diagonal_boundary_term_pressure(FEFaceEvaluation<dim,
+                                                                   fe_degree_p,
+                                                                   n_q_points_1d_p,
+                                                                   1,
+                                                                   Number,
+                                                                   VectorizedArray<Number>>& phi) const;
   };
 
 
@@ -1446,14 +1443,14 @@ namespace NS_TRBDF2 {
     FEFaceEvaluation<dim, fe_degree_p, n_q_points_1d_p, 1, Number> phi(data, true, 1, 1);
 
     for(unsigned int face = face_range.first; face < face_range.second; ++face) {
-      phi.reinit(face);
-      phi.gather_evaluate(src, true, true);
-
-      const auto coef_jump = C_p*std::abs((phi.get_normal_vector(0)*phi.inverse_jacobian(0))[dim - 1]);
-
       const auto boundary_id = data.get_boundary_id(face);
 
       if(boundary_id == 1) {
+        phi.reinit(face);
+        phi.gather_evaluate(src, true, true);
+
+        const auto coef_jump = C_p*std::abs((phi.get_normal_vector(0)*phi.inverse_jacobian(0))[dim - 1]);
+
         for(unsigned int q = 0; q < phi.n_q_points; ++q) {
           const auto& n_plus    = phi.get_normal_vector(q);
 
@@ -1849,44 +1846,22 @@ namespace NS_TRBDF2 {
   //
   template<int dim, int fe_degree_p, int fe_degree_v, int n_q_points_1d_p, int n_q_points_1d_v, typename Vec>
   void NavierStokesProjectionOperator<dim, fe_degree_p, fe_degree_v, n_q_points_1d_p, n_q_points_1d_v, Vec>::
-  assemble_diagonal_cell_term_pressure(const MatrixFree<dim, Number>&               data,
-                                       Vec&                                         dst,
-                                       const unsigned int&                          ,
-                                       const std::pair<unsigned int, unsigned int>& cell_range) const {
-    FEEvaluation<dim, fe_degree_p, n_q_points_1d_p, 1, Number> phi(data, 1, 1);
-
-    AlignedVector<VectorizedArray<Number>> diagonal(phi.dofs_per_component); /*--- Here we are using dofs_per_component but
-                                                                                   it coincides with dofs_per_cell since it is
-                                                                                   scalar finite element space ---*/
-
+  assemble_diagonal_cell_term_pressure(FEEvaluation<dim,
+                                                    fe_degree_p,
+                                                    n_q_points_1d_p,
+                                                    1,
+                                                    Number,
+                                                    VectorizedArray<Number>>& phi) const {
     const double coeff = (TR_BDF2_stage == 1) ? 1e6*gamma*dt*gamma*dt : 1e6*(1.0 - gamma)*dt*(1.0 - gamma)*dt;
 
-    /*--- Loop over all cells in the range ---*/
-    for(unsigned int cell = cell_range.first; cell < cell_range.second; ++cell) {
-      phi.reinit(cell);
+    phi.evaluate(EvaluationFlags::values | EvaluationFlags::gradients);
 
-      /*--- Loop over all dofs ---*/
-      for(unsigned int i = 0; i < phi.dofs_per_component; ++i) {
-        for(unsigned int j = 0; j < phi.dofs_per_component; ++j)
-          phi.submit_dof_value(VectorizedArray<Number>(), j); /*--- We set all dofs to zero ---*/
-        phi.submit_dof_value(make_vectorized_array<Number>(1.0), i); /*--- Now we set the current one to 1; since it is scalar,
-                                                                           we can directly use 'make_vectorized_array' without
-                                                                           relying on 'Tensor' ---*/
-        phi.evaluate(EvaluationFlags::values | EvaluationFlags::gradients);
-
-        /*--- Loop over quadrature points ---*/
-        for(unsigned int q = 0; q < phi.n_q_points; ++q) {
-          phi.submit_value(1.0/coeff*phi.get_value(q), q);
-          phi.submit_gradient(phi.get_gradient(q), q);
-        }
-        phi.integrate(EvaluationFlags::values | EvaluationFlags::gradients);
-        diagonal[i] = phi.get_dof_value(i);
-      }
-      for(unsigned int i = 0; i < phi.dofs_per_component; ++i)
-        phi.submit_dof_value(diagonal[i], i);
-
-      phi.distribute_local_to_global(dst);
+    /*--- Loop over quadrature points ---*/
+    for(unsigned int q = 0; q < phi.n_q_points; ++q) {
+      phi.submit_value(1.0/coeff*phi.get_value(q), q);
+      phi.submit_gradient(phi.get_gradient(q), q);
     }
+    phi.integrate(EvaluationFlags::values | EvaluationFlags::gradients);
   }
 
 
@@ -1894,62 +1869,42 @@ namespace NS_TRBDF2 {
   //
   template<int dim, int fe_degree_p, int fe_degree_v, int n_q_points_1d_p, int n_q_points_1d_v, typename Vec>
   void NavierStokesProjectionOperator<dim, fe_degree_p, fe_degree_v, n_q_points_1d_p, n_q_points_1d_v, Vec>::
-  assemble_diagonal_face_term_pressure(const MatrixFree<dim, Number>&               data,
-                                       Vec&                                         dst,
-                                       const unsigned int&                          ,
-                                       const std::pair<unsigned int, unsigned int>& face_range) const {
-    FEFaceEvaluation<dim, fe_degree_p, n_q_points_1d_p, 1, Number> phi_p(data, true, 1, 1),
-                                                                   phi_m(data, false, 1, 1);
+  assemble_diagonal_face_term_pressure(FEFaceEvaluation<dim,
+                                                        fe_degree_p,
+                                                        n_q_points_1d_p,
+                                                        1,
+                                                        Number,
+                                                        VectorizedArray<Number>>& phi_p,
+                                       FEFaceEvaluation<dim,
+                                                        fe_degree_p,
+                                                        n_q_points_1d_p,
+                                                        1,
+                                                        Number,
+                                                        VectorizedArray<Number>>& phi_m) const {
+    AssertDimension(phi_p.dofs_per_component, phi_m.dofs_per_component); /*--- We just assert for safety that dimension match,
+                                                                              in the sense that we have selected the proper
+                                                                              space ---*/
 
-    AssertDimension(phi_p.dofs_per_component, phi_m.dofs_per_component);
-    AlignedVector<VectorizedArray<Number>> diagonal_p(phi_p.dofs_per_component),
-                                           diagonal_m(phi_m.dofs_per_component); /*--- Again, we just assert for safety that dimension
-                                                                                       match, in the sense that we have selected
-                                                                                       the proper space ---*/
+    phi_p.evaluate(EvaluationFlags::values | EvaluationFlags::gradients);
+    phi_m.evaluate(EvaluationFlags::values | EvaluationFlags::gradients);
 
-    /*--- Loop over all faces ---*/
-    for(unsigned int face = face_range.first; face < face_range.second; ++face) {
-      phi_p.reinit(face);
-      phi_m.reinit(face);
+    const auto coef_jump = C_p*0.5*(std::abs((phi_p.get_normal_vector(0)*phi_p.inverse_jacobian(0))[dim - 1]) +
+                                    std::abs((phi_m.get_normal_vector(0)*phi_m.inverse_jacobian(0))[dim - 1]));
 
-      const auto coef_jump = C_p*0.5*(std::abs((phi_p.get_normal_vector(0)*phi_p.inverse_jacobian(0))[dim - 1]) +
-                                      std::abs((phi_m.get_normal_vector(0)*phi_m.inverse_jacobian(0))[dim - 1]));
+    /*--- Loop over quadrature points to compute the integral ---*/
+    for(unsigned int q = 0; q < phi_p.n_q_points; ++q) {
+      const auto& n_plus        = phi_p.get_normal_vector(q);
 
-      /*--- Loop over all dofs ---*/
-      for(unsigned int i = 0; i < phi_p.dofs_per_component; ++i) {
-        for(unsigned int j = 0; j < phi_p.dofs_per_component; ++j) {
-          phi_p.submit_dof_value(VectorizedArray<Number>(), j);
-          phi_m.submit_dof_value(VectorizedArray<Number>(), j);
-        }
-        phi_p.submit_dof_value(make_vectorized_array<Number>(1.0), i);
-        phi_m.submit_dof_value(make_vectorized_array<Number>(1.0), i);
-        phi_p.evaluate(EvaluationFlags::values | EvaluationFlags::gradients);
-        phi_m.evaluate(EvaluationFlags::values | EvaluationFlags::gradients);
+      const auto& avg_grad_pres = 0.5*(phi_p.get_gradient(q) + phi_m.get_gradient(q));
+      const auto& jump_pres     = phi_p.get_value(q) - phi_m.get_value(q);
 
-        /*--- Loop over all quadrature points to compute the integral ---*/
-        for(unsigned int q = 0; q < phi_p.n_q_points; ++q) {
-          const auto& n_plus        = phi_p.get_normal_vector(q);
-
-          const auto& avg_grad_pres = 0.5*(phi_p.get_gradient(q) + phi_m.get_gradient(q));
-          const auto& jump_pres     = phi_p.get_value(q) - phi_m.get_value(q);
-
-          phi_p.submit_value(-scalar_product(avg_grad_pres, n_plus) + coef_jump*jump_pres, q);
-          phi_m.submit_value(scalar_product(avg_grad_pres, n_plus) - coef_jump*jump_pres, q);
-          phi_p.submit_gradient(-theta_p*0.5*jump_pres*n_plus, q);
-          phi_m.submit_gradient(-theta_p*0.5*jump_pres*n_plus, q);
-        }
-        phi_p.integrate(EvaluationFlags::values | EvaluationFlags::gradients);
-        diagonal_p[i] = phi_p.get_dof_value(i);
-        phi_m.integrate(EvaluationFlags::values | EvaluationFlags::gradients);
-        diagonal_m[i] = phi_m.get_dof_value(i);
-      }
-      for(unsigned int i = 0; i < phi_p.dofs_per_component; ++i) {
-        phi_p.submit_dof_value(diagonal_p[i], i);
-        phi_m.submit_dof_value(diagonal_m[i], i);
-      }
-      phi_p.distribute_local_to_global(dst);
-      phi_m.distribute_local_to_global(dst);
+      phi_p.submit_value(-scalar_product(avg_grad_pres, n_plus) + coef_jump*jump_pres, q);
+      phi_m.submit_value(scalar_product(avg_grad_pres, n_plus) - coef_jump*jump_pres, q);
+      phi_p.submit_gradient(-theta_p*0.5*jump_pres*n_plus, q);
+      phi_m.submit_gradient(-theta_p*0.5*jump_pres*n_plus, q);
     }
+    phi_p.integrate(EvaluationFlags::values | EvaluationFlags::gradients);
+    phi_m.integrate(EvaluationFlags::values | EvaluationFlags::gradients);
   }
 
 
@@ -1957,44 +1912,29 @@ namespace NS_TRBDF2 {
   //
   template<int dim, int fe_degree_p, int fe_degree_v, int n_q_points_1d_p, int n_q_points_1d_v, typename Vec>
   void NavierStokesProjectionOperator<dim, fe_degree_p, fe_degree_v, n_q_points_1d_p, n_q_points_1d_v, Vec>::
-  assemble_diagonal_boundary_term_pressure(const MatrixFree<dim, Number>&               data,
-                                           Vec&                                         dst,
-                                           const unsigned int&                          ,
-                                           const std::pair<unsigned int, unsigned int>& face_range) const {
-    FEFaceEvaluation<dim, fe_degree_p, n_q_points_1d_p, 1, Number> phi(data, true, 1, 1);
+  assemble_diagonal_boundary_term_pressure(FEFaceEvaluation<dim,
+                                                            fe_degree_p,
+                                                            n_q_points_1d_p,
+                                                            1,
+                                                            Number,
+                                                            VectorizedArray<Number>>& phi) const {
+    const auto boundary_id = phi.get_matrix_free().get_boundary_id(phi.get_current_cell_index());
 
-    AlignedVector<VectorizedArray<Number>> diagonal(phi.dofs_per_component);
-
-    for(unsigned int face = face_range.first; face < face_range.second; ++face) {
-      phi.reinit(face);
+    if(boundary_id == 1) {
+      phi.evaluate(EvaluationFlags::values | EvaluationFlags::gradients);
 
       const auto coef_jump = C_p*std::abs((phi.get_normal_vector(0)*phi.inverse_jacobian(0))[dim - 1]);
 
-      const auto boundary_id = data.get_boundary_id(face);
+      for(unsigned int q = 0; q < phi.n_q_points; ++q) {
+        const auto& n_plus    = phi.get_normal_vector(q);
 
-      if(boundary_id == 1) {
-        for(unsigned int i = 0; i < phi.dofs_per_component; ++i) {
-          for(unsigned int j = 0; j < phi.dofs_per_component; ++j)
-            phi.submit_dof_value(VectorizedArray<Number>(), j);
-          phi.submit_dof_value(make_vectorized_array<Number>(1.0), i);
-          phi.evaluate(EvaluationFlags::values | EvaluationFlags::gradients);
+        const auto& grad_pres = phi.get_gradient(q);
+        const auto& pres      = phi.get_value(q);
 
-          for(unsigned int q = 0; q < phi.n_q_points; ++q) {
-            const auto& n_plus    = phi.get_normal_vector(q);
-
-            const auto& grad_pres = phi.get_gradient(q);
-            const auto& pres      = phi.get_value(q);
-
-            phi.submit_value(-scalar_product(grad_pres, n_plus) + 2.0*coef_jump*pres , q);
-            phi.submit_normal_derivative(-theta_p*pres, q);
-          }
-          phi.integrate(EvaluationFlags::values | EvaluationFlags::gradients);
-          diagonal[i] = phi.get_dof_value(i);
-        }
-        for(unsigned int i = 0; i < phi.dofs_per_component; ++i)
-          phi.submit_dof_value(diagonal[i], i);
-        phi.distribute_local_to_global(dst);
+        phi.submit_value(-scalar_product(grad_pres, n_plus) + 2.0*coef_jump*pres , q);
+        phi.submit_normal_derivative(-theta_p*pres, q);
       }
+      phi.integrate(EvaluationFlags::values | EvaluationFlags::gradients);
     }
   }
 
@@ -2023,15 +1963,14 @@ namespace NS_TRBDF2 {
        0);
     }
     else if(NS_stage == 2) {
-      this->data->initialize_dof_vector(inverse_diagonal, 1);
-      const unsigned int dummy = 0;
-
-      this->data->loop(&NavierStokesProjectionOperator::assemble_diagonal_cell_term_pressure,
-                       &NavierStokesProjectionOperator::assemble_diagonal_face_term_pressure,
-                       &NavierStokesProjectionOperator::assemble_diagonal_boundary_term_pressure,
-                       this, inverse_diagonal, dummy, false,
-                       MatrixFree<dim, Number>::DataAccessOnFaces::unspecified,
-                       MatrixFree<dim, Number>::DataAccessOnFaces::unspecified);
+      MatrixFreeTools::compute_diagonal<dim, fe_degree_p, n_q_points_1d_p, 1, Number, VectorizedArray<Number>>
+      (*(this->data),
+       inverse_diagonal,
+       [&](auto& feeval_cell){(this->assemble_diagonal_cell_term_pressure)(feeval_cell);},
+       [&](auto& feeval_face_p, auto& feeval_face_m){(this->assemble_diagonal_face_term_pressure)(feeval_face_p, feeval_face_m);},
+       [&](auto& feeval_boundary){(this->assemble_diagonal_boundary_term_pressure)(feeval_boundary);},
+       1,
+       1);
     }
 
     for(unsigned int i = 0; i < inverse_diagonal.locally_owned_size(); ++i) {
