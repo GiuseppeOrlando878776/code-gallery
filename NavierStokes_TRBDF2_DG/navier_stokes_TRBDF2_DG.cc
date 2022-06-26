@@ -112,18 +112,27 @@ namespace MatrixFreeTools {
             FEEvaluation<dim, fe_degree, n_q_points_1d, n_components, Number, VectorizedArrayType>
             phi(matrix_free, cell_range, dof_no, quad_no, first_selected_component);
 
-            AlignedVector<Tensor<1, n_components, VectorizedArrayType>> diagonal(phi.dofs_per_component);
+            typedef typename std::conditional<n_components == 1,
+                                              VectorizedArrayType,
+                                              Tensor<1, n_components, VectorizedArrayType>>::type UnitBlock;
 
-            Tensor<1, n_components, VectorizedArrayType> tmp;
-            for(unsigned int d = 0; d < n_components; ++d)
-              tmp[d] = VectorizedArrayType(1.0);
+            AlignedVector<UnitBlock> diagonal(phi.dofs_per_component);
+
+            UnitBlock tmp;
+            if(n_components == 1) {
+              tmp = VectorizedArrayType(1.0);
+            }
+            else {
+              for(unsigned int d = 0; d < n_components; ++d)
+                tmp[d] = VectorizedArrayType(1.0);
+            }
 
             for(unsigned int cell = cell_range.first; cell < cell_range.second; ++cell) {
               phi.reinit(cell);
 
               for(unsigned int i = 0; i < phi.dofs_per_component; ++i) {
                 for(unsigned int j = 0; j < phi.dofs_per_component; ++j)
-                  phi.submit_dof_value(Tensor<1, n_components, VectorizedArrayType>(), j);
+                  phi.submit_dof_value(UnitBlock(), j);
                 phi.submit_dof_value(tmp, i);
 
                 local_vmult_cell(phi);
@@ -142,11 +151,21 @@ namespace MatrixFreeTools {
             phi_p(matrix_free, face_range, true, dof_no, quad_no, first_selected_component),
             phi_m(matrix_free, face_range, false, dof_no, quad_no, first_selected_component);
 
-            AlignedVector<Tensor<1, n_components, VectorizedArrayType>> diagonal_p(phi_p.dofs_per_component),
-                                                                        diagonal_m(phi_m.dofs_per_component);
-            Tensor<1, n_components, VectorizedArrayType> tmp;
-            for(unsigned int d = 0; d < n_components; ++d)
-              tmp[d] = VectorizedArrayType(1.0);
+            typedef typename std::conditional<n_components == 1,
+                                              VectorizedArrayType,
+                                              Tensor<1, n_components, VectorizedArrayType>>::type UnitBlock;
+
+            AlignedVector<UnitBlock> diagonal_p(phi_p.dofs_per_component),
+                                     diagonal_m(phi_m.dofs_per_component);
+
+            UnitBlock tmp;
+            if(n_components == 1) {
+              tmp = VectorizedArrayType(1.0);
+            }
+            else {
+              for(unsigned int d = 0; d < n_components; ++d)
+                tmp[d] = VectorizedArrayType(1.0);
+            }
 
             for(unsigned int face = face_range.first; face < face_range.second; ++face) {
               phi_p.reinit(face);
@@ -154,8 +173,8 @@ namespace MatrixFreeTools {
 
               for(unsigned int i = 0; i < phi_p.dofs_per_component; ++i) {
                 for(unsigned int j = 0; j < phi_p.dofs_per_component; ++j) {
-                  phi_p.submit_dof_value(Tensor<1, n_components, VectorizedArrayType>(), j);
-                  phi_m.submit_dof_value(Tensor<1, n_components, VectorizedArrayType>(), j);
+                  phi_p.submit_dof_value(UnitBlock(), j);
+                  phi_m.submit_dof_value(UnitBlock(), j);
                 }
                 phi_p.submit_dof_value(tmp, i);
                 phi_m.submit_dof_value(tmp, i);
@@ -179,18 +198,27 @@ namespace MatrixFreeTools {
             FEFaceEvaluation<dim, fe_degree, n_q_points_1d, n_components, Number, VectorizedArrayType>
             phi(matrix_free, boundary_range, true, dof_no, quad_no, first_selected_component);
 
-            AlignedVector<Tensor<1, n_components, VectorizedArrayType>> diagonal(phi.dofs_per_component);
+            typedef typename std::conditional<n_components == 1,
+                                              VectorizedArrayType,
+                                              Tensor<1, n_components, VectorizedArrayType>>::type UnitBlock;
 
-            Tensor<1, n_components, VectorizedArrayType> tmp;
-            for(unsigned int d = 0; d < n_components; ++d)
-              tmp[d] = VectorizedArrayType(1.0);
+            AlignedVector<UnitBlock> diagonal(phi.dofs_per_component);
+
+            UnitBlock tmp;
+            if(n_components == 1) {
+              tmp = VectorizedArrayType(1.0);
+            }
+            else {
+              for(unsigned int d = 0; d < n_components; ++d)
+                tmp[d] = VectorizedArrayType(1.0);
+            }
 
             for(unsigned int face = boundary_range.first; face < boundary_range.second; ++face) {
               phi.reinit(face);
 
               for(unsigned int i = 0; i < phi.dofs_per_component; ++i) {
                 for(unsigned int j = 0; j < phi.dofs_per_component; ++j)
-                  phi.submit_dof_value(Tensor<1, n_components, VectorizedArrayType>(), j);
+                  phi.submit_dof_value(UnitBlock(), j);
                 phi.submit_dof_value(tmp, i);
 
                 local_vmult_boundary(phi);
