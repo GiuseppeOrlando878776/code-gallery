@@ -445,8 +445,9 @@ namespace NS_TRBDF2 {
           const auto& pres_n             = phi_pres_n.get_value(q);
           auto pres_n_times_identity     = tensor_product_u_n;
           pres_n_times_identity = 0;
-          for(unsigned int d = 0; d < dim; ++d)
+          for(unsigned int d = 0; d < dim; ++d) {
             pres_n_times_identity[d][d] = pres_n;
+          }
 
           phi.submit_value(1.0/(gamma*dt)*u_n, q); /*--- 'submit_value' contains quantites that we want to test against the
                                                           test function ---*/
@@ -491,8 +492,9 @@ namespace NS_TRBDF2 {
           const auto& pres_n                   = phi_pres_n.get_value(q);
           auto pres_n_times_identity           = tensor_product_u_n;
           pres_n_times_identity = 0;
-          for(unsigned int d = 0; d < dim; ++d)
+          for(unsigned int d = 0; d < dim; ++d) {
             pres_n_times_identity[d][d] = pres_n;
+          }
 
           phi.submit_value(1.0/((1.0 - gamma)*dt)*u_n_gamma, q);
           phi.submit_gradient(a32*tensor_product_u_n_gamma + a31*tensor_product_u_n -
@@ -688,9 +690,9 @@ namespace NS_TRBDF2 {
 
         const auto boundary_id = data.get_boundary_id(face); /*--- Get the id in order to impose the proper boundary condition ---*/
 
-        const auto coef_jump   = (boundary_id == 1 || boundary_id == 3) ?
+        const auto coef_jump   = (boundary_id == 3) ?
                                  0.0 : C_u*std::abs((phi.get_normal_vector(0) * phi.inverse_jacobian(0))[dim - 1]);
-        const double aux_coeff = (boundary_id == 1 || boundary_id == 3) ? 0.0 : 1.0;
+        const double aux_coeff = (boundary_id == 3) ? 0.0 : 1.0;
 
         /*--- Now we loop over all the quadrature points to compute the integrals ---*/
         for(unsigned int q = 0; q < phi.n_q_points; ++q) {
@@ -706,7 +708,7 @@ namespace NS_TRBDF2 {
 
           auto u_n_gamma_m                       = Tensor<1, dim, VectorizedArray<Number>>();
           auto u_n_m                             = Tensor<1, dim, VectorizedArray<Number>>();
-          if(boundary_id == 0) {
+          if(boundary_id == 2) {
             const auto& point_vectorized = phi.quadrature_point(q);
             for(unsigned int v = 0; v < VectorizedArray<Number>::size(); ++v) {
               Point<dim> point; /*--- The point returned by the 'quadrature_point' function is not an instance of Point
@@ -764,9 +766,9 @@ namespace NS_TRBDF2 {
         phi.reinit(face);
 
         const auto boundary_id = data.get_boundary_id(face);
-        const auto coef_jump   = (boundary_id == 1 || boundary_id == 3) ?
+        const auto coef_jump   = (boundary_id == 3) ?
                                  0.0 : C_u*std::abs((phi.get_normal_vector(0) * phi.inverse_jacobian(0))[dim - 1]);
-        const double aux_coeff = (boundary_id == 1 || boundary_id == 3) ? 0.0 : 1.0;
+        const double aux_coeff = (boundary_id == 3) ? 0.0 : 1.0;
 
         /*--- Now we loop over all the quadrature points to compute the integrals ---*/
         for(unsigned int q = 0; q < phi.n_q_points; ++q) {
@@ -786,7 +788,7 @@ namespace NS_TRBDF2 {
           auto u_n_m                           = Tensor<1, dim, VectorizedArray<Number>>();
           auto u_n_gamma_m                     = Tensor<1, dim, VectorizedArray<Number>>();
           auto u_np1_m                         = Tensor<1, dim, VectorizedArray<Number>>();
-          if(boundary_id == 0) {
+          if(boundary_id == 2) {
             const auto& point_vectorized = phi.quadrature_point(q);
             for(unsigned int v = 0; v < VectorizedArray<Number>::size(); ++v) {
               Point<dim> point;
@@ -1054,7 +1056,7 @@ namespace NS_TRBDF2 {
 
         /*--- The application of the mirror principle is not so trivial because we have a Dirichlet condition
               on a single component for the outflow; so we distinguish the two cases ---*/
-        if(boundary_id != 1 && boundary_id != 3) {
+        if(boundary_id != 3) {
           const double coef_trasp = 0.0;
 
           /*--- Now we loop over all quadrature points ---*/
@@ -1120,7 +1122,7 @@ namespace NS_TRBDF2 {
         const auto boundary_id = data.get_boundary_id(face);
         const auto coef_jump   = C_u*std::abs((phi.get_normal_vector(0) * phi.inverse_jacobian(0))[dim - 1]);
 
-        if(boundary_id != 1 && boundary_id != 3) {
+        if(boundary_id != 3) {
           const double coef_trasp = 0.0;
 
           /*--- Now we loop over all quadrature points ---*/
@@ -1339,7 +1341,6 @@ namespace NS_TRBDF2 {
         phi.submit_gradient(phi.get_gradient(q), q);
         phi.submit_value(1.0/coeff*phi.get_value(q), q);
       }
-
       phi.integrate_scatter(EvaluationFlags::values | EvaluationFlags::gradients, dst);
     }
   }
@@ -1398,7 +1399,7 @@ namespace NS_TRBDF2 {
     for(unsigned int face = face_range.first; face < face_range.second; ++face) {
       const auto boundary_id = data.get_boundary_id(face);
 
-      if(boundary_id == 1 || boundary_id == 3) {
+      if(boundary_id == 3) {
         phi.reinit(face);
         phi.gather_evaluate(src, EvaluationFlags::values | EvaluationFlags::gradients);
 
@@ -1410,7 +1411,7 @@ namespace NS_TRBDF2 {
           const auto& grad_pres = phi.get_gradient(q);
           const auto& pres      = phi.get_value(q);
 
-          phi.submit_value(-scalar_product(grad_pres, n_plus) + 2.0*coef_jump*pres , q);
+          phi.submit_value(-scalar_product(grad_pres, n_plus) + 2.0*coef_jump*pres, q);
           phi.submit_normal_derivative(-theta_p*pres, q);
         }
         phi.integrate_scatter(EvaluationFlags::values | EvaluationFlags::gradients, dst);
@@ -1818,7 +1819,7 @@ namespace NS_TRBDF2 {
         const auto boundary_id = data.get_boundary_id(face);
         const auto coef_jump   = C_u*std::abs((phi.get_normal_vector(0) * phi.inverse_jacobian(0))[dim - 1]);
 
-        if(boundary_id != 1 && boundary_id != 3) {
+        if(boundary_id != 1) {
           const double coef_trasp = 0.0;
 
           /*--- Loop over all dofs ---*/
@@ -1916,7 +1917,7 @@ namespace NS_TRBDF2 {
         const auto boundary_id = data.get_boundary_id(face);
         const auto coef_jump   = C_u*std::abs((phi.get_normal_vector(0) * phi.inverse_jacobian(0))[dim - 1]);
 
-        if(boundary_id != 1 && boundary_id != 3) {
+        if(boundary_id != 1) {
           const double coef_trasp = 0.0;
 
           /*--- Loop over all dofs ---*/
@@ -2121,7 +2122,7 @@ namespace NS_TRBDF2 {
     for(unsigned int face = face_range.first; face < face_range.second; ++face) {
       const auto boundary_id = data.get_boundary_id(face);
 
-      if(boundary_id == 1 || boundary_id == 3) {
+      if(boundary_id == 3) {
         phi.reinit(face);
 
         const auto coef_jump = C_p*std::abs((phi.get_normal_vector(0)*phi.inverse_jacobian(0))[dim - 1]);

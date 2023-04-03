@@ -290,101 +290,13 @@ void NavierStokesProjection<dim>::create_triangulation(const unsigned int n_refi
 
   triangulation.clear();
 
-  double x_start, y_start;
+  GridIn<dim> grid_in;
+  grid_in.attach_triangulation(triangulation);
 
-  if(import_mesh) {
-    GridIn<dim> gridin;
-    gridin.attach_triangulation(triangulation);
-    std::ifstream f("unstr_sqcyl_coarse.msh");
-    gridin.read_msh(f);
-
-    x_start = -10.0;
-    y_start = -10.0;
-  }
-  else {
-    parallel::distributed::Triangulation<dim> tria1(MPI_COMM_WORLD),
-                                              tria2(MPI_COMM_WORLD),
-                                              tria3(MPI_COMM_WORLD),
-                                              tria4(MPI_COMM_WORLD),
-                                              tria5(MPI_COMM_WORLD),
-                                              tria6(MPI_COMM_WORLD),
-                                              tria7(MPI_COMM_WORLD),
-                                              tria8(MPI_COMM_WORLD),
-                                              tria9(MPI_COMM_WORLD),
-                                              tria10(MPI_COMM_WORLD),
-                                              tria11(MPI_COMM_WORLD),
-                                              tria12(MPI_COMM_WORLD);
-
-    GridGenerator::subdivided_hyper_rectangle(tria1, {10, 16},
-                                              Point<dim>(0.0, 10.7),
-                                              Point<dim>(9.3, 20.0));
-    GridGenerator::subdivided_hyper_rectangle(tria2, {14, 16},
-                                              Point<dim>(9.3, 10.7),
-                                              Point<dim>(10.7, 20.0));
-    GridGenerator::subdivided_hyper_rectangle(tria3, {20, 16},
-                                              Point<dim>(10.7, 10.7),
-                                              Point<dim>(30.0, 20.0));
-    GridGenerator::subdivided_hyper_rectangle(tria4, {10, 14},
-                                              Point<dim>(0.0, 9.3),
-                                              Point<dim>(9.3, 10.7));
-    GridGenerator::subdivided_hyper_rectangle(tria5, {14, 2},
-                                              Point<dim>(9.3, 10.5),
-                                              Point<dim>(10.7, 10.7));
-    GridGenerator::subdivided_hyper_rectangle(tria6, {2, 10},
-                                              Point<dim>(9.3, 9.5),
-                                              Point<dim>(9.5, 10.5));
-    GridGenerator::subdivided_hyper_rectangle(tria7, {2, 10},
-                                              Point<dim>(10.5, 9.5),
-                                              Point<dim>(10.7, 10.5));
-    GridGenerator::subdivided_hyper_rectangle(tria8, {14, 2},
-                                              Point<dim>(9.3, 9.3),
-                                              Point<dim>(10.7, 9.5));
-    GridGenerator::subdivided_hyper_rectangle(tria9, {20, 14},
-                                              Point<dim>(10.7, 9.3),
-                                              Point<dim>(30.0, 10.7));
-    GridGenerator::subdivided_hyper_rectangle(tria10, {10, 16},
-                                              Point<dim>(0.0, 0.0),
-                                              Point<dim>(9.3, 9.3));
-    GridGenerator::subdivided_hyper_rectangle(tria11, {14, 16},
-                                              Point<dim>(9.3, 0.0),
-                                              Point<dim>(10.7, 9.3));
-    GridGenerator::subdivided_hyper_rectangle(tria12, {20, 16},
-                                              Point<dim>(10.7, 0.0),
-                                              Point<dim>(30.0, 9.3));
-    GridGenerator::merge_triangulations({&tria1, &tria2, &tria3, &tria4, &tria5, &tria6,
-                                         &tria7, &tria8, &tria9, &tria10, &tria11, &tria12},
-                                         triangulation, 1e-8, true);
-
-    x_start = 0.0;
-    y_start = 0.0;
-  }
-
-  /*--- Set boundary id for the triangulation ---*/
-  for(const auto& face : triangulation.active_face_iterators()) {
-    if(face->at_boundary()) {
-      const Point<dim> center = face->center();
-      // left side
-      if(std::abs(center[0] - x_start) < 1e-10) {
-        face->set_boundary_id(0);
-      }
-      // right side
-      else if(std::abs(center[0] - (30.0 + x_start)) < 1e-10) {
-        face->set_boundary_id(1);
-      }
-      // cylinder boundary
-      else if(center[0] < x_start + 10.5 + 1e-10 && center[0] > x_start + 9.5 - 1e-10 &&
-              center[1] < y_start + 10.5 + 1e-10 && center[1] > y_start + 9.5 - 1e-10) {
-        face->set_boundary_id(2);
-      }
-      // sides of channel
-      else {
-        Assert(std::abs(center[1] - y_start) < 1.0e-10 ||
-               std::abs(center[1] - (20.0 + y_start)) < 1.0e-10,
-               ExcInternalError());
-        face->set_boundary_id(3);
-      }
-    }
-  }
+  std::string   filename = "nsbench2.inp";
+  std::ifstream file(filename);
+  Assert(file, ExcFileNotOpen(filename.c_str()));
+  grid_in.read_ucd(file);
 
   /*--- We strongly advice to check the documentation to verify the meaning of all input parameters. ---*/
   if(restart) {
@@ -877,7 +789,7 @@ void NavierStokesProjection<dim>::compute_lift_and_drag() {
   for(const auto& cell : dof_handler_velocity.active_cell_iterators()) {
     if(cell->is_locally_owned()) {
       for(unsigned int face = 0; face < GeometryInfo<dim>::faces_per_cell; ++face) {
-        if(cell->face(face)->at_boundary() && cell->face(face)->boundary_id() == 2) {
+        if(cell->face(face)->at_boundary() && cell->face(face)->boundary_id() == 4) {
           fe_face_values_velocity.reinit(cell, face);
           fe_face_values_pressure.reinit(tmp_cell, face);
 
