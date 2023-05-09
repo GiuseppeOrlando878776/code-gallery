@@ -230,8 +230,8 @@ namespace NS_TRBDF2 {
     /*--- Penalty method parameters, theta = 1 means SIP, while C_p and C_u are the penalization coefficients ---*/
     const double theta_v = 1.0;
     const double theta_p = 1.0;
-    const double C_p     = 1.0*(fe_degree_p + 1)*(fe_degree_p + 1);
-    const double C_u     = 1.0*(fe_degree_v + 1)*(fe_degree_v + 1);
+    const double C_p     = 100.0*(fe_degree_p + 1)*(fe_degree_p + 1);
+    const double C_u     = 100.0*(fe_degree_v + 1)*(fe_degree_v + 1);
 
     Vec                          u_extr; /*--- Auxiliary variable to update the extrapolated velocity ---*/
 
@@ -725,10 +725,10 @@ namespace NS_TRBDF2 {
           }
           const auto& tensor_product_u_n_gamma_m = outer_product(u_n_gamma_m, u_n_gamma_ov_2);
 
-          const auto& lambda_n_gamma_ov_2        = (boundary_id == 1 || boundary_id == 3) ?
+          const auto& lambda_n_gamma_ov_2        = (boundary_id == 3) ?
                                                    0.0 : std::abs(scalar_product(u_n_gamma_ov_2, n_plus));
 
-          const auto& lambda_n                   = (boundary_id == 1 || boundary_id == 3) ?
+          const auto& lambda_n                   = (boundary_id == 3) ?
                                                    0.0 : std::abs(scalar_product(u_n, n_plus));
           const auto& jump_u_n                   = u_n - u_n_m;
 
@@ -805,14 +805,14 @@ namespace NS_TRBDF2 {
           const auto& u_n_3gamma_ov_2          = phi_n_3gamma_ov_2.get_value(q);
           const auto& tensor_product_u_np1_m   = outer_product(u_np1_m, u_n_3gamma_ov_2);
 
-          const auto& lambda_n_3gamma_ov_2     = (boundary_id == 1 || boundary_id == 3) ?
+          const auto& lambda_n_3gamma_ov_2     = (boundary_id == 3) ?
                                                  0.0 : std::abs(scalar_product(u_n_3gamma_ov_2, n_plus));
 
-          const auto& lambda_n                 = (boundary_id == 1 || boundary_id == 3) ?
+          const auto& lambda_n                 = (boundary_id == 3) ?
                                                  0.0 : std::abs(scalar_product(u_n, n_plus));
           const auto& jump_u_n                 = u_n - u_n_m;
 
-          const auto& lambda_n_gamma           = (boundary_id == 1 || boundary_id == 3) ?
+          const auto& lambda_n_gamma           = (boundary_id == 3) ?
                                                  0.0 : std::abs(scalar_product(u_n_gamma, n_plus));
           const auto& jump_u_n_gamma           = u_n_gamma - u_n_gamma_m;
 
@@ -1190,7 +1190,7 @@ namespace NS_TRBDF2 {
                                                                  phi_old(data, 1, 1);
     FEEvaluation<dim, fe_degree_v, n_q_points_1d_p, dim, Number> phi_proj(data, 0, 1);
 
-    const double coeff   = (TR_BDF2_stage == 1) ? 1e6*gamma*dt*gamma*dt : 1e6*(1.0 - gamma)*dt*(1.0 - gamma)*dt;
+    const double coeff   = (TR_BDF2_stage == 1) ? 1e3*gamma*dt*gamma*dt : 1e3*(1.0 - gamma)*dt*(1.0 - gamma)*dt;
 
     const double coeff_2 = (TR_BDF2_stage == 1) ? gamma*dt : (1.0 - gamma)*dt;
 
@@ -1329,7 +1329,7 @@ namespace NS_TRBDF2 {
     /*--- We first start by declaring the suitable instances to read already available quantities. ---*/
     FEEvaluation<dim, fe_degree_p, n_q_points_1d_p, 1, Number> phi(data, 1, 1);
 
-    const double coeff = (TR_BDF2_stage == 1) ? 1e6*gamma*dt*gamma*dt : 1e6*(1.0 - gamma)*dt*(1.0 - gamma)*dt;
+    const double coeff = (TR_BDF2_stage == 1) ? 1e3*gamma*dt*gamma*dt : 1e3*(1.0 - gamma)*dt*(1.0 - gamma)*dt;
 
     /*--- Loop over all cells in the range ---*/
     for(unsigned int cell = cell_range.first; cell < cell_range.second; ++cell) {
@@ -1819,7 +1819,7 @@ namespace NS_TRBDF2 {
         const auto boundary_id = data.get_boundary_id(face);
         const auto coef_jump   = C_u*std::abs((phi.get_normal_vector(0) * phi.inverse_jacobian(0))[dim - 1]);
 
-        if(boundary_id != 1) {
+        if(boundary_id != 3) {
           const double coef_trasp = 0.0;
 
           /*--- Loop over all dofs ---*/
@@ -1917,7 +1917,7 @@ namespace NS_TRBDF2 {
         const auto boundary_id = data.get_boundary_id(face);
         const auto coef_jump   = C_u*std::abs((phi.get_normal_vector(0) * phi.inverse_jacobian(0))[dim - 1]);
 
-        if(boundary_id != 1) {
+        if(boundary_id != 3) {
           const double coef_trasp = 0.0;
 
           /*--- Loop over all dofs ---*/
@@ -2012,7 +2012,7 @@ namespace NS_TRBDF2 {
                                                                                    it coincides with dofs_per_cell since it is
                                                                                    scalar finite element space ---*/
 
-    const double coeff = (TR_BDF2_stage == 1) ? 1e6*gamma*dt*gamma*dt : 1e6*(1.0 - gamma)*dt*(1.0 - gamma)*dt;
+    const double coeff = (TR_BDF2_stage == 1) ? 1e3*gamma*dt*gamma*dt : 1e3*(1.0 - gamma)*dt*(1.0 - gamma)*dt;
 
     /*--- Loop over all cells in the range ---*/
     for(unsigned int cell = cell_range.first; cell < cell_range.second; ++cell) {
