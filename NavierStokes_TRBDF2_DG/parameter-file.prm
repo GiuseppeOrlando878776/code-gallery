@@ -2,14 +2,14 @@ subsection Physical data
   # In this subsection we declare the physical data
   # The initial and final time, and the Reynolds number
   set initial_time = 0.0
-  set final_time   = 25.0
+  set final_time   = 60.0
   set Reynolds     = 100.0
 end
 
 subsection Time step data
   # In this subsection we declare the data that is to be used for time discretization,
   # i.e. the time step dt
-  set dt = 5.0e-3
+  set dt = 2.5e-3
 end
 
 subsection Space discretization
@@ -25,13 +25,13 @@ subsection Data solve
   # for the velocity.
   set max_iterations = 10000 # maximal number of iterations that linear solvers must make
   set eps            = 1e-8  # stopping criterion
-  set step_restart   = 5000
+  set step_restart   = 24000
 end
 
-set saving directory = Re100_DNS_step35
+set saving directory = Re100_DNS_round_cylinder
 
 #The output frequency
-set output_interval = 500
+set output_interval = 2400
 
 #Finally we set the verbosity level
 set verbose = true
@@ -40,4 +40,4 @@ set verbose = true
 set restart = false
 
 #Set if you want to save files for possible restart
-set save_for_restart = false
+set save_for_restart = true
