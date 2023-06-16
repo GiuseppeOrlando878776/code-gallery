@@ -9,15 +9,14 @@ end
 subsection Time step data
   # In this subsection we declare the data that is to be used for time discretization,
   # i.e. the time step dt
-  set dt = 2.5e-3
+  set dt = 5.0e-3
 end
 
 subsection Space discretization
   # In this subsection we declare the data that is relevant to the space discretization
   # we set the number of global refines the triangulation must have
   # and the degree k of the pair Q_(k+1)--Q_k of velocity--pressure finite element spaces
-  set n_of_refines = 3
-  set import_mesh  = false
+  set n_of_refines = 2
 end
 
 subsection Data solve
@@ -25,13 +24,13 @@ subsection Data solve
   # for the velocity.
   set max_iterations = 10000 # maximal number of iterations that linear solvers must make
   set eps            = 1e-8  # stopping criterion
-  set step_restart   = 24000
+  set step_restart   = 12000
 end
 
 set saving directory = Re100_DNS_round_cylinder
 
 #The output frequency
-set output_interval = 2400
+set output_interval = 1200
 
 #Finally we set the verbosity level
 set verbose = true

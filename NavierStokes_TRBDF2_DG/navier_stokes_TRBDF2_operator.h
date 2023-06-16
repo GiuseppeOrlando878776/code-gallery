@@ -1151,22 +1151,22 @@ namespace NS_TRBDF2 {
             const auto& grad_u  = phi.get_gradient(q);
             const auto& u       = phi.get_value(q);
 
-            auto u_m            = u;
-            auto grad_u_m       = grad_u;
+            auto u_np1_m         = u;
+            auto grad_u_np1_m    = grad_u;
             for(unsigned int v = 0; v < VectorizedArray<Number>::size(); ++v) {
-              u_m[1][v]         = -u_m[1][v];
+              u_np1_m[1][v]         = -u_np1_m[1][v];
 
-              grad_u_m[0][0][v] = -grad_u_m[0][0][v];
-              grad_u_m[0][1][v] = -grad_u_m[0][1][v];
+              grad_u_np1_m[0][0][v] = -grad_u_np1_m[0][0][v];
+              grad_u_np1_m[0][1][v] = -grad_u_np1_m[0][1][v];
             }
 
             const auto& u_n_3gamma_ov_2      = phi_n_3gamma_ov_2.get_value(q);
             const auto& lambda_n_3gamma_ov_2 = std::abs(scalar_product(u_n_3gamma_ov_2, n_plus));
 
-            phi.submit_value(a33/Re*(-(0.5*(grad_u + grad_u_m))*n_plus + coef_jump*(u - u_m)) +
-                             a33*outer_product(0.5*(u + u_m), u_n_3gamma_ov_2)*n_plus +
-                             a33*0.5*lambda_n_3gamma_ov_2*(u - u_m), q);
-            phi.submit_normal_derivative(-theta_v*a33/Re*(u - u_m), q);
+            phi.submit_value(a33/Re*(-(0.5*(grad_u + grad_u_np1_m))*n_plus + coef_jump*(u - u_np1_m)) +
+                             a33*outer_product(0.5*(u + u_np1_m), u_n_3gamma_ov_2)*n_plus +
+                             a33*0.5*lambda_n_3gamma_ov_2*(u - u_np1_m), q);
+            phi.submit_normal_derivative(-theta_v*a33/Re*(u - u_np1_m), q);
           }
           phi.integrate_scatter(EvaluationFlags::values | EvaluationFlags::gradients, dst);
         }

@@ -170,7 +170,6 @@ private:
   double       eps;
 
   unsigned int n_refines;
-  bool         import_mesh;
 
   std::string  saving_dir;
 
@@ -224,7 +223,6 @@ NavierStokesProjection<dim>::NavierStokesProjection(RunTimeParameters::Data_Stor
   max_its(data.max_iterations),
   eps(data.eps),
   n_refines(data.n_refines),
-  import_mesh(data.import_mesh),
   saving_dir(data.dir),
   restart(data.restart),
   save_for_restart(data.save_for_restart),
@@ -269,58 +267,15 @@ void NavierStokesProjection<dim>::create_triangulation(const unsigned int n_refi
   /*--- We strongly advice to check the documentation to verify the meaning of all input parameters. ---*/
   triangulation.clear();
 
-  parallel::distributed::Triangulation<dim> tria1(MPI_COMM_WORLD),
-                                            tria2(MPI_COMM_WORLD),
-                                            tria3(MPI_COMM_WORLD),
-                                            tria4(MPI_COMM_WORLD),
-                                            tria5(MPI_COMM_WORLD),
-                                            tria6(MPI_COMM_WORLD),
-                                            tria7(MPI_COMM_WORLD),
-                                            tria8(MPI_COMM_WORLD),
-                                            triangulation_tmp(MPI_COMM_WORLD);
+  GridIn<dim> grid_in;
+  grid_in.attach_triangulation(triangulation);
 
-  /*--- We strongly advice to check the documentation to verify the meaning of all input parameters. ---*/
-  GridGenerator::channel_with_cylinder(tria1, 0.01, 4, 2.0, true);
-  GridTools::shift(Tensor<1, dim>({0.8, 0.8}), tria1);
+  const std::string filename = "./" + saving_dir + "/refcircle_structuredV3.vtk";
+  std::ifstream file(filename);
+  grid_in.read_vtk(file);
 
-  GridGenerator::subdivided_hyper_rectangle(tria2, {8, 4},
-                                            Point<dim>(0.0, 0.8),
-                                            Point<dim>(0.8, 1.21));
-
-  GridGenerator::merge_triangulations(tria1, tria2, triangulation_tmp, 1.e-12, true);
-
-  GridGenerator::subdivided_hyper_rectangle(tria3, {30, 8},
-                                            Point<dim>(0.0, 0.06),
-                                            Point<dim>(3.0, 0.8));
-
-  GridGenerator::subdivided_hyper_rectangle(tria4, {30, 8},
-                                            Point<dim>(0.0, 1.21),
-                                            Point<dim>(3.0, 1.94));
-
-  GridGenerator::subdivided_hyper_rectangle(tria5, {30, 1},
-                                            Point<dim>(0.0, 0.02),
-                                            Point<dim>(3.0, 0.06));
-
-  GridGenerator::subdivided_hyper_rectangle(tria6, {30, 1},
-                                            Point<dim>(0.0, 1.94),
-                                            Point<dim>(3.0, 1.98));
-
-  GridGenerator::subdivided_hyper_rectangle(tria7, {30, 2},
-                                            Point<dim>(0.0, 0.0),
-                                            Point<dim>(3.0, 0.02));
-
-  GridGenerator::subdivided_hyper_rectangle(tria8, {30, 2},
-                                            Point<dim>(0.0, 1.98),
-                                            Point<dim>(3.0, 2.0));
-
-  GridGenerator::merge_triangulations({&triangulation_tmp, &tria3, &tria4, &tria5, &tria6, &tria7, &tria8},
-                                      triangulation, 1e-12, true);
-
-  GridTools::scale(10.0, triangulation); /*--- Scale triangulation in order to work with proper non-dimensional configuration ---*/
-
-  /*--- Attach manifold (manifold ids are already copied) ---*/
-  triangulation.set_manifold(0, PolarManifold<2>(Point<2>(10.0, 10.0)));
-  TransfiniteInterpolationManifold<2> inner_manifold;
+  triangulation.set_manifold(0, PolarManifold<dim>(Point<dim>(10.0, 10.0)));
+  TransfiniteInterpolationManifold<dim> inner_manifold;
   inner_manifold.initialize(triangulation);
   triangulation.set_manifold(1, inner_manifold);
 
@@ -337,16 +292,14 @@ void NavierStokesProjection<dim>::create_triangulation(const unsigned int n_refi
       else if(std::abs(center[0] - 30.0) < 1e-10) {
         face->set_boundary_id(1);
       }
-      // cylinder boundary
-      else if(face->manifold_id() == 0) {
-        face->set_boundary_id(2);
-      }
-      // sides of channel
-      else {
-        Assert(std::abs(center[1] - 0.0) < 1e-10 ||
-               std::abs(center[1] - 20.0) < 1e-10,
-               ExcInternalError());
+      // wall boundaries
+      else if(std::abs(center[1] - 0.0) < 1e-10 ||
+              std::abs(center[1] - 20.0) < 1e-10) {
         face->set_boundary_id(3);
+      }
+      // cylinder boundary
+      else {
+        face->set_boundary_id(2);
       }
     }
   }
@@ -733,7 +686,31 @@ void NavierStokesProjection<dim>::project_grad(const unsigned int flag) {
 //
 template<int dim>
 double NavierStokesProjection<dim>::get_maximal_velocity() {
-  return u_n.linfty_norm();
+  QGaussLobatto<dim> quadrature_formula(EquationData::degree_p + 2);
+  const int n_q_points = quadrature_formula.size();
+
+  std::vector<Vector<double>> velocity_values(n_q_points, Vector<double>(dim));
+
+  FEValues<dim> fe_values_velocity(fe_velocity, quadrature_formula, update_quadrature_points | update_values | update_JxW_values);
+
+  double max_local_velocity = 0.0;
+
+  for(const auto& cell : dof_handler_velocity.active_cell_iterators()) {
+    if(cell->is_locally_owned()) {
+      fe_values_velocity.reinit(cell);
+
+      fe_values_velocity.get_function_values(u_n, velocity_values);
+
+      for(int q = 0; q < n_q_points; q++) {
+        max_local_velocity = std::max(max_local_velocity, std::sqrt(velocity_values[q][0]*velocity_values[q][0] +
+                                                                    velocity_values[q][1]*velocity_values[q][1]));
+      }
+    }
+  }
+
+  const double max_velocity = Utilities::MPI::max(max_local_velocity, MPI_COMM_WORLD);
+
+  return max_velocity;
 }
 
 
