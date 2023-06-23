@@ -76,6 +76,7 @@ protected:
   const double gamma;         //--- TR-BDF2 parameter
   unsigned int TR_BDF2_stage; //--- Flag to check at which current stage of TR-BDF2 are
   const double Re;
+  const double Ma;
   double       dt;
 
   EquationData::Velocity<dim> vel_init;
@@ -90,10 +91,6 @@ protected:
   /*--- Handler for dofs ---*/
   DoFHandler<dim> dof_handler_velocity;
   DoFHandler<dim> dof_handler_pressure;
-
-  /*--- Quadrature formulas for velocity and pressure, respectively ---*/
-  QGauss<dim> quadrature_pressure;
-  QGauss<dim> quadrature_velocity;
 
   /*--- Now we define all the vectors for the solution. We start from the pressure
         with p^n, p^(n+gamma) and a vector for rhs ---*/
@@ -149,12 +146,12 @@ private:
 
   /*--- Now we need an instance of the class implemented before with the weak form ---*/
   NavierStokesProjectionOperator<dim, EquationData::degree_p, EquationData::degree_p + 1,
-                                 EquationData::degree_p + 1, EquationData::degree_p + 2,
+                                 EquationData::degree_p + 1, static_cast<int>(1.5*(EquationData::degree_p + 1)) + 1,
                                  LinearAlgebra::distributed::Vector<double>> navier_stokes_matrix;
 
   /*--- This is an instance for geometric multigrid preconditioner ---*/
   MGLevelObject<NavierStokesProjectionOperator<dim, EquationData::degree_p, EquationData::degree_p + 1,
-                                               EquationData::degree_p + 1, EquationData::degree_p + 2,
+                                               EquationData::degree_p + 1, static_cast<int>(1.5*(EquationData::degree_p + 1)) + 1,
                                                LinearAlgebra::distributed::Vector<float>>> mg_matrices;
 
   /*--- Here we define two 'AffineConstraints' instance, one for each finite element space.
@@ -208,6 +205,7 @@ NavierStokesProjection<dim>::NavierStokesProjection(RunTimeParameters::Data_Stor
   gamma(2.0 - std::sqrt(2.0)),  //--- Save also in the NavierStokes class the TR-BDF2 parameter value
   TR_BDF2_stage(1),             //--- Initialize the flag for the TR_BDF2 stage
   Re(data.Reynolds),
+  Ma(data.Mach),
   dt(data.dt),
   vel_init(data.initial_time),
   pres_init(data.initial_time),
@@ -217,8 +215,6 @@ NavierStokesProjection<dim>::NavierStokesProjection(RunTimeParameters::Data_Stor
   fe_pressure(FE_DGQ<dim>(EquationData::degree_p), 1),
   dof_handler_velocity(triangulation),
   dof_handler_pressure(triangulation),
-  quadrature_pressure(EquationData::degree_p + 1),
-  quadrature_velocity(EquationData::degree_p + 2),
   navier_stokes_matrix(data),
   max_its(data.max_iterations),
   eps(data.eps),
@@ -270,14 +266,9 @@ void NavierStokesProjection<dim>::create_triangulation(const unsigned int n_refi
   GridIn<dim> grid_in;
   grid_in.attach_triangulation(triangulation);
 
-  const std::string filename = "./" + saving_dir + "/refcircle_structuredV3.vtk";
+  const std::string filename = "./" + saving_dir + "/refsquare_structured45deg_Yoon_expanded.msh";
   std::ifstream file(filename);
-  grid_in.read_vtk(file);
-
-  triangulation.set_manifold(0, PolarManifold<dim>(Point<dim>(10.0, 10.0)));
-  TransfiniteInterpolationManifold<dim> inner_manifold;
-  inner_manifold.initialize(triangulation);
-  triangulation.set_manifold(1, inner_manifold);
+  grid_in.read_msh(file);
 
   /*--- Set boundary id ---*/
   for(const auto& face : triangulation.active_face_iterators()) {
@@ -286,20 +277,20 @@ void NavierStokesProjection<dim>::create_triangulation(const unsigned int n_refi
 
       // left side
       if(std::abs(center[0] - 0.0) < 1e-10) {
-        face->set_boundary_id(0);
+        face->set_boundary_id(2);
       }
       // right side
-      else if(std::abs(center[0] - 30.0) < 1e-10) {
-        face->set_boundary_id(1);
+      else if(std::abs(center[0] - 70.0) < 1e-10) {
+        face->set_boundary_id(3);
       }
       // wall boundaries
       else if(std::abs(center[1] - 0.0) < 1e-10 ||
-              std::abs(center[1] - 20.0) < 1e-10) {
-        face->set_boundary_id(3);
+              std::abs(center[1] - 100.0) < 1e-10) {
+        face->set_boundary_id(1);
       }
       // cylinder boundary
       else {
-        face->set_boundary_id(2);
+        face->set_boundary_id(4);
       }
     }
   }
@@ -311,6 +302,9 @@ void NavierStokesProjection<dim>::create_triangulation(const unsigned int n_refi
     pcout << "Number of refines = " << n_refines << std::endl;
     triangulation.refine_global(n_refines);
   }
+
+  pcout << "CFL_c = " << 1.0/Ma*dt*(EquationData::degree_p + 1)*
+                         std::sqrt(dim)/GridTools::minimal_cell_diameter(triangulation) << std::endl;
 }
 
 
@@ -331,7 +325,9 @@ void NavierStokesProjection<dim>::setup_dofs() {
         << std::endl
         << "dim (M_h) = " << dof_handler_pressure.n_dofs()
         << std::endl
-        << "Re        = " << Re << std::endl
+        << "Re        = " << Re
+        << std::endl
+        << "Ma        = " << Ma << std::endl
         << std::endl;
 
   if(Utilities::MPI::this_mpi_process(MPI_COMM_WORLD) == 0) {
@@ -340,12 +336,12 @@ void NavierStokesProjection<dim>::setup_dofs() {
   }
 
   typename MatrixFree<dim, double>::AdditionalData additional_data;
-  additional_data.mapping_update_flags                = (update_gradients | update_JxW_values |
-                                                         update_quadrature_points | update_values);
-  additional_data.mapping_update_flags_inner_faces    = (update_gradients | update_JxW_values | update_quadrature_points |
-                                                         update_normal_vectors | update_values);
-  additional_data.mapping_update_flags_boundary_faces = (update_gradients | update_JxW_values | update_quadrature_points |
-                                                         update_normal_vectors | update_values);
+  additional_data.mapping_update_flags                = (update_values | update_gradients | update_quadrature_points |
+                                                         update_JxW_values);
+  additional_data.mapping_update_flags_inner_faces    = (update_values | update_gradients | update_normal_vectors |
+                                                         update_quadrature_points | update_JxW_values);
+  additional_data.mapping_update_flags_boundary_faces = (update_values | update_gradients | update_normal_vectors |
+                                                         update_quadrature_points | update_JxW_values);
   additional_data.tasks_parallel_scheme               = MatrixFree<dim, double>::AdditionalData::none;
 
   std::vector<const DoFHandler<dim>*> dof_handlers; /*--- Vector of dof_handlers to feed the 'MatrixFree'. Here the order
@@ -362,11 +358,10 @@ void NavierStokesProjection<dim>::setup_dofs() {
   constraints.push_back(&constraints_velocity);
   constraints.push_back(&constraints_pressure);
 
-  std::vector<QGauss<1>> quadratures; /*--- We cannot directly use 'quadrature_velocity' and 'quadrature_pressure',
-                                            because the 'MatrixFree' structure wants a quadrature formula for 1D
+  std::vector<QGauss<1>> quadratures; /*--- The 'MatrixFree' structure wants a quadrature formula for 1D
                                             (this is way the template parameter of the previous class was called 'n_q_points_1d_p'
                                              and 'n_q_points_1d_v' and the reason of '1' as QGauss template parameter). ---*/
-  quadratures.push_back(QGauss<1>(EquationData::degree_p + 2));
+  quadratures.push_back(QGauss<1>(static_cast<int>(1.5*(EquationData::degree_p + 1)) + 1));
   quadratures.push_back(QGauss<1>(EquationData::degree_p + 1));
 
   /*--- Initialize the matrix-free structure and size properly the vectors. Here again the
@@ -400,10 +395,10 @@ void NavierStokesProjection<dim>::setup_dofs() {
     typename MatrixFree<dim, float>::AdditionalData additional_data_mg;
 
     additional_data_mg.tasks_parallel_scheme               = MatrixFree<dim, float>::AdditionalData::none;
-    additional_data_mg.mapping_update_flags                = (update_gradients | update_JxW_values);
-    additional_data_mg.mapping_update_flags_inner_faces    = (update_gradients | update_JxW_values);
-    additional_data_mg.mapping_update_flags_boundary_faces = (update_gradients | update_JxW_values);
-    additional_data_mg.mg_level = level;
+    additional_data_mg.mapping_update_flags                = (update_values | update_gradients | update_JxW_values);
+    additional_data_mg.mapping_update_flags_inner_faces    = (update_values | update_gradients | update_normal_vectors | update_JxW_values);
+    additional_data_mg.mapping_update_flags_boundary_faces = (update_values | update_gradients | update_normal_vectors | update_JxW_values);
+    additional_data_mg.mg_level                            = level;
 
     std::vector<const DoFHandler<dim>*> dof_handlers_mg;
     dof_handlers_mg.push_back(&dof_handler_velocity);
@@ -423,6 +418,7 @@ void NavierStokesProjection<dim>::setup_dofs() {
     const std::vector<unsigned int> tmp = {1};
     mg_matrices[level].initialize(mg_mf_storage_level, tmp, tmp);
     mg_matrices[level].set_dt(dt);
+    mg_matrices[level].set_Mach(Ma);
     mg_matrices[level].set_NS_stage(2);
   }
 }
@@ -489,10 +485,10 @@ void NavierStokesProjection<dim>::initialize() {
     }
   }
   else {
-    VectorTools::interpolate(dof_handler_pressure, pres_init, pres_n);
+    VectorTools::interpolate(MappingQ1<dim>(), dof_handler_pressure, pres_init, pres_n);
 
-    VectorTools::interpolate(dof_handler_velocity, vel_init, u_n_minus_1);
-    VectorTools::interpolate(dof_handler_velocity, vel_init, u_n);
+    VectorTools::interpolate(MappingQ1<dim>(), dof_handler_velocity, vel_init, u_n_minus_1);
+    VectorTools::interpolate(MappingQ1<dim>(), dof_handler_velocity, vel_init, u_n);
   }
 }
 
@@ -555,7 +551,7 @@ void NavierStokesProjection<dim>::diffusion_step() {
                                                     EquationData::degree_p,
                                                     EquationData::degree_p + 1,
                                                     EquationData::degree_p + 1,
-                                                    EquationData::degree_p + 2,
+                                                    static_cast<int>(1.5*(EquationData::degree_p + 1)) + 1,
                                                     LinearAlgebra::distributed::Vector<double>>> preconditioner;
   navier_stokes_matrix.compute_diagonal();
   preconditioner.initialize(navier_stokes_matrix);
@@ -596,7 +592,7 @@ void NavierStokesProjection<dim>::projection_step() {
                                                                             EquationData::degree_p,
                                                                             EquationData::degree_p + 1,
                                                                             EquationData::degree_p + 1,
-                                                                            EquationData::degree_p + 2,
+                                                                            static_cast<int>(1.5*(EquationData::degree_p + 1)) + 1,
                                                                             LinearAlgebra::distributed::Vector<float>>,
                                              LinearAlgebra::distributed::Vector<float>>;
   mg::SmootherRelaxation<SmootherType, LinearAlgebra::distributed::Vector<float>> mg_smoother;
@@ -626,7 +622,7 @@ void NavierStokesProjection<dim>::projection_step() {
                                                              EquationData::degree_p,
                                                              EquationData::degree_p + 1,
                                                              EquationData::degree_p + 1,
-                                                             EquationData::degree_p + 2,
+                                                             static_cast<int>(1.5*(EquationData::degree_p + 1)) + 1,
                                                              LinearAlgebra::distributed::Vector<float>>,
                               PreconditionIdentity> mg_coarse(cg_mg, mg_matrices[0], identity);
 
@@ -755,7 +751,7 @@ void NavierStokesProjection<dim>::output_results(const unsigned int step) {
   PostprocessorVorticity<dim> postprocessor;
   data_out.add_data_vector(dof_handler_velocity, u_n, postprocessor);
 
-  data_out.build_patches(MappingQ<dim>(EquationData::degree_p + 1, false), EquationData::degree_p + 1, DataOut<dim>::curved_inner_cells);
+  data_out.build_patches(MappingQ1<dim>(), EquationData::degree_p + 1);
 
   const std::string output = "./" + saving_dir + "/solution-" + Utilities::int_to_string(step, 5) + ".vtu";
   data_out.write_vtu_in_parallel(output, MPI_COMM_WORLD);
@@ -818,7 +814,7 @@ void NavierStokesProjection<dim>::compute_lift_and_drag() {
   for(const auto& cell : dof_handler_velocity.active_cell_iterators()) {
     if(cell->is_locally_owned()) {
       for(unsigned int face = 0; face < GeometryInfo<dim>::faces_per_cell; ++face) {
-        if(cell->face(face)->at_boundary() && cell->face(face)->boundary_id() == 2) {
+        if(cell->face(face)->at_boundary() && cell->face(face)->boundary_id() == 4) {
           fe_face_values_velocity.reinit(cell, face);
           fe_face_values_pressure.reinit(tmp_cell, face);
 
@@ -861,9 +857,11 @@ void NavierStokesProjection<dim>::compute_lift_and_drag() {
 //
 template<int dim>
 void NavierStokesProjection<dim>::compute_lipschitz_number() {
-  FEValues<dim> fe_values(fe_velocity, quadrature_velocity, update_gradients);
-  std::vector<std::vector<Tensor<1, dim, double>>> solution_gradients_velocity(quadrature_velocity.size(),
-                                                                               std::vector<Tensor<1, dim, double>>(dim));
+  QGaussLobatto<dim> quadrature_formula(EquationData::degree_p + 2);
+  const int n_q_points = quadrature_formula.size();
+
+  FEValues<dim> fe_values(fe_velocity, quadrature_formula, update_gradients);
+  std::vector<std::vector<Tensor<1, dim, double>>> solution_gradients_velocity(n_q_points, std::vector<Tensor<1, dim, double>>(dim));
 
   double max_local_vorticity = std::numeric_limits<double>::min();
 
@@ -872,7 +870,7 @@ void NavierStokesProjection<dim>::compute_lipschitz_number() {
       fe_values.reinit(cell);
       fe_values.get_function_gradients(u_n, solution_gradients_velocity);
 
-      for(unsigned int q = 0; q < quadrature_velocity.size(); ++q) {
+      for(int q = 0; q < n_q_points; ++q) {
         max_local_vorticity = std::max(max_local_vorticity,
                                        std::abs(solution_gradients_velocity[q][1][0] - solution_gradients_velocity[q][0][1])*dt);
       }
@@ -969,12 +967,11 @@ void NavierStokesProjection<dim>::run(const bool verbose, const unsigned int out
     const double max_vel = get_maximal_velocity();
     pcout<< "Maximal velocity = " << max_vel << std::endl;
     /*--- The Courant number is computed taking into account the polynomial degree for the velocity ---*/
-    pcout << "CFL = " << dt*max_vel*(EquationData::degree_p + 1)*
-                         std::sqrt(dim)/GridTools::minimal_cell_diameter(triangulation) << std::endl;
+    pcout << "CFL_u = " << dt*max_vel*(EquationData::degree_p + 1)*
+                           std::sqrt(dim)/GridTools::minimal_cell_diameter(triangulation) << std::endl;
 
     /*--- Now we focus on the statistics ---*/
     compute_lift_and_drag();
-    // compute lipschitz number at every timestep
     compute_lipschitz_number();
 
     /*--- Save the results ---*/
