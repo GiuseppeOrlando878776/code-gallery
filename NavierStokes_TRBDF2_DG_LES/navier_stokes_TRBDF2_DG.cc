@@ -23,7 +23,6 @@
 #include <deal.II/grid/grid_refinement.h>
 #include <deal.II/grid/tria_accessor.h>
 #include <deal.II/grid/tria_iterator.h>
-#include <deal.II/distributed/grid_refinement.h>
 #include <deal.II/grid/grid_in.h>
 
 #include <deal.II/dofs/dof_handler.h>
@@ -34,6 +33,7 @@
 #include <deal.II/fe/fe_values.h>
 #include <deal.II/fe/fe_tools.h>
 #include <deal.II/fe/fe_system.h>
+#include <deal.II/fe/mapping_q.h>
 
 #include <deal.II/numerics/matrix_tools.h>
 #include <deal.II/numerics/vector_tools.h>
@@ -59,8 +59,6 @@
 #include <deal.II/multigrid/mg_smoother.h>
 #include <deal.II/multigrid/mg_matrix.h>
 
-#include <deal.II/meshworker/mesh_loop.h>
-
 #include "navier_stokes_TRBDF2_LES_operator.h"
 
 using namespace NS_TRBDF2;
@@ -83,6 +81,7 @@ protected:
   const double gamma;         //--- TR-BDF2 parameter
   unsigned int TR_BDF2_stage; //--- Flag to check at which current stage of TR-BDF2 are
   const double Re;
+  const double Ma;
   const double Cs2;
   double       dt;
 
@@ -108,10 +107,6 @@ protected:
   DoFHandler<dim> dof_handler_velocity;
   DoFHandler<dim> dof_handler_pressure;
   DoFHandler<dim> dof_handler_deltas;
-
-  /*--- Quadrature formulas for velocity and pressure, respectively ---*/
-  QGauss<dim> quadrature_pressure;
-  QGauss<dim> quadrature_velocity;
 
   /*--- Now we define all the vectors for the solution. We start from the pressure
         with p^n, p^(n+gamma) and a vector for rhs ---*/
@@ -179,37 +174,38 @@ protected:
   void output_statistics(Point<dim> center);
 
 private:
+  void compute_y_plus(LinearAlgebra::distributed::Vector<double>& vel,
+                      double lower_boundary, double upper_boundary,
+                      Point<dim> center, double object_length);
+
   void compute_lift_and_drag();
+
+  void compute_lipschitz_number();
 
   void initialize_points_around_obstacle(const unsigned int n_points, Point<dim> start, double dx);
 
   std::vector<Point<dim>> initialize_profile_points(double angle, double spacing, Point<dim> start_point,  Point<dim> end_point);
 
-  void compute_pressure_avg_over_boundary(int n, double height = 0.0, int n_points = 1);
+  void compute_pressure_avg_over_boundary(int n);
 
   void compute_stress_avg_over_boundary(int n, Point<dim> center, double object_length, double lower_boundary, double upper_boundary);
-
-  void compute_lipschitz_number();
 
   void compute_velocity_avg(int n, std::vector<Point<dim>>& points, std::vector<Vector<double>>& avg_velocity);
 
   void initialize_nearest_boundary_point_mapping();
 
-  void compute_y_plus(LinearAlgebra::distributed::Vector<double>& vel,
-                      double lower_boundary, double upper_boundary,
-                      Point<dim> center, double object_length);
-
   /*--- Technical member to handle the various steps ---*/
   std::shared_ptr<MatrixFree<dim, double>> matrix_free_storage;
+  MappingQ1<dim> mapping;
 
   /*--- Now we need an instance of the class implemented before with the weak form ---*/
   NavierStokesProjectionOperator<dim, EquationData::degree_p, EquationData::degree_p + 1,
-                                 EquationData::degree_p + 1, EquationData::degree_p + 2,
+                                 EquationData::degree_p + 1, static_cast<int>(1.5*(EquationData::degree_p + 1)) + 1,
                                  LinearAlgebra::distributed::Vector<double>> navier_stokes_matrix;
 
   /*--- This is an instance for geometric multigrid preconditioner ---*/
   MGLevelObject<NavierStokesProjectionOperator<dim, EquationData::degree_p, EquationData::degree_p + 1,
-                                               EquationData::degree_p + 1, EquationData::degree_p + 2,
+                                               EquationData::degree_p + 1, static_cast<int>(1.5*(EquationData::degree_p + 1)) + 1,
                                                LinearAlgebra::distributed::Vector<float>>> mg_matrices;
 
   /*--- Here we define two 'AffineConstraints' instance, one for each finite element space.
@@ -226,7 +222,6 @@ private:
   double       eps;
 
   unsigned int n_refines;
-  bool         import_mesh;
 
   std::string  saving_dir;
 
@@ -250,11 +245,12 @@ private:
   std::ofstream output_lift;
   std::ofstream output_drag;
 
+  std::ofstream output_lipschitz;
+
   std::ofstream output_avg_pressure;
   std::ofstream output_avg_stress;
   std::ofstream output_Cp;
   std::ofstream output_Cf;
-  std::ofstream output_lipschitz;
   std::ofstream out_vel_hor;
   std::ofstream out_vel_ver1;
   std::ofstream out_vel_ver2;
@@ -274,6 +270,7 @@ NavierStokesProjection<dim>::NavierStokesProjection(RunTimeParameters::Data_Stor
   gamma(2.0 - std::sqrt(2.0)),  //--- Save also in the NavierStokes class the TR-BDF2 parameter value
   TR_BDF2_stage(1),             //--- Initialize the flag for the TR_BDF2 stage
   Re(data.Reynolds),
+  Ma(data.Mach),
   Cs2(data.Cs2),
   dt(data.dt),
   vel_init(data.initial_time),
@@ -286,13 +283,11 @@ NavierStokesProjection<dim>::NavierStokesProjection(RunTimeParameters::Data_Stor
   dof_handler_velocity(triangulation),
   dof_handler_pressure(triangulation),
   dof_handler_deltas(triangulation),
-  quadrature_pressure(EquationData::degree_p + 1),
-  quadrature_velocity(EquationData::degree_p + 2),
+  mapping(),
   navier_stokes_matrix(data),
   max_its(data.max_iterations),
   eps(data.eps),
   n_refines(data.n_refines),
-  import_mesh(data.import_mesh),
   saving_dir(data.dir),
   restart(data.restart),
   save_for_restart(data.save_for_restart),
@@ -335,154 +330,19 @@ template<int dim>
 void NavierStokesProjection<dim>::create_triangulation(const unsigned int n_refines) {
   TimerOutput::Scope t(time_table, "Create triangulation");
 
+  /*--- We strongly advice to check the documentation to verify the meaning of all input parameters. ---*/
   triangulation.clear();
 
-  double x_start, y_start; /*--- Domain initial coordintes to be setted according to the mesh ---*/
+  GridIn<dim> grid_in;
+  grid_in.attach_triangulation(triangulation);
 
-  if(import_mesh) {
-    GridIn<dim> gridin;
-    gridin.attach_triangulation(triangulation);
-    std::ifstream f("unstr_sqcyl_coarse.msh");
-    gridin.read_msh(f);
+  const std::string filename = "./" + saving_dir + "/refcircle_structured_Tian.msh";
+  std::ifstream file(filename);
+  grid_in.read_msh(file);
 
-    /*--- Serial triangulation for y+---*/
-    GridIn<dim> sgridin;
-    sgridin.attach_triangulation(serial_triangulation);
-    std::ifstream sf("unstr_sqcyl_coarse.msh");
-    sgridin.read_msh(sf);
-
-    x_start = -10.0;
-    y_start = -10.0;
-  }
-  else {
-    parallel::distributed::Triangulation<dim> tria1(MPI_COMM_WORLD),
-                                              tria2(MPI_COMM_WORLD),
-                                              tria3(MPI_COMM_WORLD),
-                                              tria4(MPI_COMM_WORLD),
-                                              tria5(MPI_COMM_WORLD),
-                                              tria6(MPI_COMM_WORLD),
-                                              tria7(MPI_COMM_WORLD),
-                                              tria8(MPI_COMM_WORLD),
-                                              tria9(MPI_COMM_WORLD),
-                                              tria10(MPI_COMM_WORLD),
-                                              tria11(MPI_COMM_WORLD),
-                                              tria12(MPI_COMM_WORLD);
-
-    GridGenerator::subdivided_hyper_rectangle(tria1, {10, 16},
-                                              Point<dim>(0.0, 10.7),
-                                              Point<dim>(9.3, 20.0));
-    GridGenerator::subdivided_hyper_rectangle(tria2, {14, 16},
-                                              Point<dim>(9.3, 10.7),
-                                              Point<dim>(10.7, 20.0));
-    GridGenerator::subdivided_hyper_rectangle(tria3, {20, 16},
-                                              Point<dim>(10.7, 10.7),
-                                              Point<dim>(30.0, 20.0));
-    GridGenerator::subdivided_hyper_rectangle(tria4, {10, 14},
-                                              Point<dim>(0.0, 9.3),
-                                              Point<dim>(9.3, 10.7));
-    GridGenerator::subdivided_hyper_rectangle(tria5, {14, 2},
-                                              Point<dim>(9.3, 10.5),
-                                              Point<dim>(10.7, 10.7));
-    GridGenerator::subdivided_hyper_rectangle(tria6, {2, 10},
-                                              Point<dim>(9.3, 9.5),
-                                              Point<dim>(9.5, 10.5));
-    GridGenerator::subdivided_hyper_rectangle(tria7, {2, 10},
-                                              Point<dim>(10.5, 9.5),
-                                              Point<dim>(10.7, 10.5));
-    GridGenerator::subdivided_hyper_rectangle(tria8, {14, 2},
-                                              Point<dim>(9.3, 9.3),
-                                              Point<dim>(10.7, 9.5));
-    GridGenerator::subdivided_hyper_rectangle(tria9, {20, 14},
-                                              Point<dim>(10.7, 9.3),
-                                              Point<dim>(30.0, 10.7));
-    GridGenerator::subdivided_hyper_rectangle(tria10, {10, 16},
-                                              Point<dim>(0.0, 0.0),
-                                              Point<dim>(9.3, 9.3));
-    GridGenerator::subdivided_hyper_rectangle(tria11, {14, 16},
-                                              Point<dim>(9.3, 0.0),
-                                              Point<dim>(10.7, 9.3));
-    GridGenerator::subdivided_hyper_rectangle(tria12, {20, 16},
-                                              Point<dim>(10.7, 0.0),
-                                              Point<dim>(30.0, 9.3));
-    GridGenerator::merge_triangulations({&tria1, &tria2, &tria3, &tria4, &tria5, &tria6,
-                                         &tria7, &tria8, &tria9, &tria10, &tria11, &tria12},
-                                         triangulation, 1e-8, true);
-
-    /*--- Serial triangulation for y+ ---*/
-    Triangulation<dim> stria1, stria2, stria3, stria4,
-                       stria5, stria6, stria7, stria8,
-                       stria9, stria10, stria11, stria12;
-
-    GridGenerator::subdivided_hyper_rectangle(stria1, {10, 16},
-                                              Point<dim>(0.0, 10.7),
-                                              Point<dim>(9.3, 20.0));
-    GridGenerator::subdivided_hyper_rectangle(stria2, {14, 16},
-                                              Point<dim>(9.3, 10.7),
-                                              Point<dim>(10.7, 20.0));
-    GridGenerator::subdivided_hyper_rectangle(stria3, {20, 16},
-                                              Point<dim>(10.7, 10.7),
-                                              Point<dim>(30.0, 20.0));
-    GridGenerator::subdivided_hyper_rectangle(stria4, {10, 14},
-                                              Point<dim>(0.0, 9.3),
-                                              Point<dim>(9.3, 10.7));
-    GridGenerator::subdivided_hyper_rectangle(stria5, {14, 2},
-                                              Point<dim>(9.3, 10.5),
-                                              Point<dim>(10.7, 10.7));
-    GridGenerator::subdivided_hyper_rectangle(stria6, {2, 10},
-                                              Point<dim>(9.3, 9.5),
-                                              Point<dim>(9.5, 10.5));
-    GridGenerator::subdivided_hyper_rectangle(stria7, {2, 10},
-                                              Point<dim>(10.5, 9.5),
-                                              Point<dim>(10.7, 10.5));
-    GridGenerator::subdivided_hyper_rectangle(stria8, {14, 2},
-                                              Point<dim>(9.3, 9.3),
-                                              Point<dim>(10.7, 9.5));
-    GridGenerator::subdivided_hyper_rectangle(stria9, {20, 14},
-                                              Point<dim>(10.7, 9.3),
-                                              Point<dim>(30.0, 10.7));
-    GridGenerator::subdivided_hyper_rectangle(stria10, {10, 16},
-                                              Point<dim>(0.0, 0.0),
-                                              Point<dim>(9.3, 9.3));
-    GridGenerator::subdivided_hyper_rectangle(stria11, {14, 16},
-                                              Point<dim>(9.3, 0.0),
-                                              Point<dim>(10.7, 9.3));
-    GridGenerator::subdivided_hyper_rectangle(stria12, {20, 16},
-                                              Point<dim>(10.7, 0.0),
-                                              Point<dim>(30.0, 9.3));
-    GridGenerator::merge_triangulations({&stria1, &stria2, &stria3, &stria4, &stria5, &stria6,
-                                         &stria7, &stria8, &stria9, &stria10, &stria11, &stria12},
-                                         serial_triangulation, 1e-8, true);
-
-    x_start = 0.0;
-    y_start = 0.0;
-  }
-
-  /*--- Set boundary id for the triangulation ---*/
-  for(const auto& face : triangulation.active_face_iterators()) {
-    if(face->at_boundary()) {
-      const Point<dim> center = face->center();
-      // left side
-      if(std::abs(center[0] - x_start) < 1e-10) {
-        face->set_boundary_id(0);
-      }
-      // right side
-      else if(std::abs(center[0] - (30.0 + x_start)) < 1e-10) {
-        face->set_boundary_id(1);
-      }
-      // cylinder boundary
-      else if(center[0] < x_start + 10.5 + 1e-10 && center[0] > x_start + 9.5 - 1e-10 &&
-              center[1] < y_start + 10.5 + 1e-10 && center[1] > y_start + 9.5 - 1e-10) {
-        face->set_boundary_id(2);
-      }
-      // sides of channel
-      else {
-        Assert(std::abs(center[1] - y_start) < 1.0e-10 ||
-               std::abs(center[1] - (20.0 + y_start)) < 1.0e-10,
-               ExcInternalError());
-        face->set_boundary_id(3);
-      }
-    }
-  }
+  GridIn<dim> grid_in_serial;
+  grid_in_serial.attach_triangulation(serial_triangulation);
+  grid_in_serial.read_msh(file);
 
   /*--- We strongly advice to check the documentation to verify the meaning of all input parameters. ---*/
   if(restart) {
@@ -493,6 +353,31 @@ void NavierStokesProjection<dim>::create_triangulation(const unsigned int n_refi
     pcout << "Number of refines = " << n_refines << std::endl;
     triangulation.refine_global(n_refines);
     serial_triangulation.refine_global(n_refines);
+  }
+
+  /*--- Set boundary id ---*/
+  for(const auto& face : triangulation.active_face_iterators()) {
+    if(face->at_boundary()) {
+      const Point<dim> center = face->center();
+
+      // left side
+      if(std::abs(center[0] - 0.0) < 1e-10) {
+        face->set_boundary_id(2);
+      }
+      // right side
+      else if(std::abs(center[0] - 30.0) < 1e-10) {
+        face->set_boundary_id(3);
+      }
+      // wall boundaries
+      else if(std::abs(center[1] - 0.0) < 1e-10 ||
+              std::abs(center[1] - 20.0) < 1e-10) {
+        face->set_boundary_id(1);
+      }
+      // cylinder boundary
+      else {
+        face->set_boundary_id(4);
+      }
+    }
   }
 }
 
@@ -518,6 +403,8 @@ void NavierStokesProjection<dim>::setup_dofs() {
         << "dim (W_h) = " << dof_handler_deltas.n_dofs()
         << std::endl
         << "Re        = " << Re
+        << std::endl
+        << "Ma        = " << Ma
         << std::endl
         << "Cs2       = " << Cs2 << std::endl
         << std::endl;
@@ -555,17 +442,16 @@ void NavierStokesProjection<dim>::setup_dofs() {
   constraints.push_back(&constraints_pressure);
   constraints.push_back(&constraints_deltas);
 
-  std::vector<QGauss<1>> quadratures; /*--- We cannot directly use 'quadrature_velocity' and 'quadrature_pressure',
-                                            because the 'MatrixFree' structure wants a quadrature formula for 1D
+  std::vector<QGauss<1>> quadratures; /*--- The 'MatrixFree' structure wants a quadrature formula for 1D
                                             (this is way the template parameter of the previous class was called 'n_q_points_1d_p'
                                              and 'n_q_points_1d_v' and the reason of '1' as QGauss template parameter). ---*/
-  quadratures.push_back(QGauss<1>(EquationData::degree_p + 2));
+  quadratures.push_back(QGauss<1>(static_cast<int>(1.5*(EquationData::degree_p + 1)) + 1));
   quadratures.push_back(QGauss<1>(EquationData::degree_p + 1));
   quadratures.push_back(QGauss<1>(1));
 
   /*--- Initialize the matrix-free structure and size properly the vectors. Here again the
         second input argument of the 'initialize_dof_vector' method depends on the order of 'dof_handlers' ---*/
-  matrix_free_storage->reinit(MappingQ1<dim>(), dof_handlers, constraints, quadratures, additional_data);
+  matrix_free_storage->reinit(mapping, dof_handlers, constraints, quadratures, additional_data);
 
   matrix_free_storage->initialize_dof_vector(u_star, 0);
   matrix_free_storage->initialize_dof_vector(rhs_u, 0);
@@ -614,7 +500,7 @@ void NavierStokesProjection<dim>::setup_dofs() {
     additional_data_mg.mapping_update_flags                = (update_gradients | update_JxW_values);
     additional_data_mg.mapping_update_flags_inner_faces    = (update_gradients | update_JxW_values);
     additional_data_mg.mapping_update_flags_boundary_faces = (update_gradients | update_JxW_values);
-    additional_data_mg.mg_level = level;
+    additional_data_mg.mg_level                            = level;
 
     std::vector<const DoFHandler<dim>*> dof_handlers_mg;
     dof_handlers_mg.push_back(&dof_handler_velocity);
@@ -639,6 +525,7 @@ void NavierStokesProjection<dim>::setup_dofs() {
     const std::vector<unsigned int> tmp = {1};
     mg_matrices[level].initialize(mg_mf_storage_level, tmp, tmp);
     mg_matrices[level].set_dt(dt);
+    mg_matrices[level].set_Mach(Ma);
     mg_matrices[level].set_NS_stage(2);
   }
 }
@@ -705,10 +592,295 @@ void NavierStokesProjection<dim>::initialize() {
     }
   }
   else {
-    VectorTools::interpolate(dof_handler_pressure, pres_init, pres_n);
+    VectorTools::interpolate(mapping, dof_handler_pressure, pres_init, pres_n);
 
-    VectorTools::interpolate(dof_handler_velocity, vel_init, u_n_minus_1);
-    VectorTools::interpolate(dof_handler_velocity, vel_init, u_n);
+    VectorTools::interpolate(mapping, dof_handler_velocity, vel_init, u_n_minus_1);
+    VectorTools::interpolate(mapping, dof_handler_velocity, vel_init, u_n);
+  }
+}
+
+
+// This function computes the extrapolated velocity to be used in the momentum predictor
+//
+template<int dim>
+void NavierStokesProjection<dim>::interpolate_velocity() {
+  TimerOutput::Scope t(time_table, "Interpolate velocity");
+
+  //--- TR-BDF2 first step
+  if(TR_BDF2_stage == 1) {
+    u_extr.equ(1.0 + gamma/(2.0*(1.0 - gamma)), u_n);
+    u_tmp.equ(gamma/(2.0*(1.0 - gamma)), u_n_minus_1);
+    u_extr.add(-1.0, u_tmp);
+  }
+  //--- TR-BDF2 second step
+  else {
+    u_extr.equ(1.0 + (1.0 - gamma)/gamma, u_n_gamma);
+    u_tmp.equ((1.0 - gamma)/gamma, u_n);
+    u_extr.add(-1.0, u_tmp);
+  }
+}
+
+
+// We are finally ready to solve the diffusion step.
+//
+template<int dim>
+void NavierStokesProjection<dim>::diffusion_step() {
+  TimerOutput::Scope t(time_table, "Diffusion step");
+
+  /*--- We first speicify that we want to deal with velocity dof_handler (index 0, since it is the first one
+        in the 'dof_handlers' vector) ---*/
+  const std::vector<unsigned int> tmp = {0};
+  navier_stokes_matrix.initialize(matrix_free_storage, tmp, tmp);
+
+  /*--- Next, we specify at we are at stage 1, namely the diffusion step ---*/
+  navier_stokes_matrix.set_NS_stage(1);
+
+  /*--- Now, we compute the right-hand side and we set the convective velocity. The necessity of 'set_u_extr' is
+        that this quantity is required in the bilinear forms and we can't use a vector of src like on the right-hand side,
+        so it has to be available ---*/
+  if(TR_BDF2_stage == 1) {
+    navier_stokes_matrix.vmult_rhs_velocity(rhs_u, {u_n, u_extr, pres_n, deltas, y_plus});
+    navier_stokes_matrix.set_u_extr(u_extr);
+    u_star.equ(1.0, u_extr);
+  }
+  else {
+    navier_stokes_matrix.vmult_rhs_velocity(rhs_u, {u_n, u_n_gamma, pres_n_gamma, u_extr, deltas, y_plus});
+    navier_stokes_matrix.set_u_extr(u_extr);
+    u_star.equ(1.0, u_extr);
+  }
+
+  /*--- Build the linear solver; in this case we specifiy the maximum number of iterations and residual ---*/
+  SolverControl solver_control(max_its, eps*rhs_u.l2_norm());
+  SolverGMRES<LinearAlgebra::distributed::Vector<double>> gmres(solver_control);
+
+  /*--- Build a Jacobi preconditioner and solve ---*/
+  PreconditionJacobi<NavierStokesProjectionOperator<dim,
+                                                    EquationData::degree_p,
+                                                    EquationData::degree_p + 1,
+                                                    EquationData::degree_p + 1,
+                                                    static_cast<int>(1.5*(EquationData::degree_p + 1)) + 1,
+                                                    LinearAlgebra::distributed::Vector<double>>> preconditioner;
+  navier_stokes_matrix.compute_diagonal();
+  preconditioner.initialize(navier_stokes_matrix);
+
+  gmres.solve(navier_stokes_matrix, u_star, rhs_u, preconditioner);
+}
+
+
+// Next, we solve the projection step.
+//
+template<int dim>
+void NavierStokesProjection<dim>::projection_step() {
+  TimerOutput::Scope t(time_table, "Projection step pressure");
+
+  /*--- We start in the same way of 'diffusion_step': we first reinitialize with the index of FE space,
+        we specify that this is the second stage and we compute the right-hand side ---*/
+  const std::vector<unsigned int> tmp = {1};
+  navier_stokes_matrix.initialize(matrix_free_storage, tmp, tmp);
+
+  navier_stokes_matrix.set_NS_stage(2);
+
+  if(TR_BDF2_stage == 1) {
+    navier_stokes_matrix.vmult_rhs_pressure(rhs_p, {u_star, pres_n});
+  }
+  else {
+    navier_stokes_matrix.vmult_rhs_pressure(rhs_p, {u_star, pres_n_gamma});
+  }
+
+  /*--- Build the linear solver (Conjugate Gradient in this case) ---*/
+  SolverControl solver_control(max_its, eps*rhs_p.l2_norm());
+  SolverCG<LinearAlgebra::distributed::Vector<double>> cg(solver_control);
+
+  /*--- Build the preconditioner (as in step-37) ---*/
+  MGTransferMatrixFree<dim, float> mg_transfer;
+  mg_transfer.build(dof_handler_pressure);
+
+  using SmootherType = PreconditionChebyshev<NavierStokesProjectionOperator<dim,
+                                                                            EquationData::degree_p,
+                                                                            EquationData::degree_p + 1,
+                                                                            EquationData::degree_p + 1,
+                                                                            static_cast<int>(1.5*(EquationData::degree_p + 1)) + 1,
+                                                                            LinearAlgebra::distributed::Vector<float>>,
+                                             LinearAlgebra::distributed::Vector<float>>;
+  mg::SmootherRelaxation<SmootherType, LinearAlgebra::distributed::Vector<float>> mg_smoother;
+  MGLevelObject<typename SmootherType::AdditionalData> smoother_data;
+  smoother_data.resize(0, triangulation.n_global_levels() - 1);
+  for(unsigned int level = 0; level < triangulation.n_global_levels(); ++level) {
+    if(level > 0) {
+      smoother_data[level].smoothing_range     = 15.0;
+      smoother_data[level].degree              = 3;
+      smoother_data[level].eig_cg_n_iterations = 10;
+    }
+    else {
+      smoother_data[0].smoothing_range     = 2e-2;
+      smoother_data[0].degree              = numbers::invalid_unsigned_int;
+      smoother_data[0].eig_cg_n_iterations = mg_matrices[0].m();
+    }
+    mg_matrices[level].compute_diagonal();
+    smoother_data[level].preconditioner = mg_matrices[level].get_matrix_diagonal_inverse();
+  }
+  mg_smoother.initialize(mg_matrices, smoother_data);
+
+  PreconditionIdentity                                identity;
+  SolverCG<LinearAlgebra::distributed::Vector<float>> cg_mg(solver_control);
+  MGCoarseGridIterativeSolver<LinearAlgebra::distributed::Vector<float>,
+                              SolverCG<LinearAlgebra::distributed::Vector<float>>,
+                              NavierStokesProjectionOperator<dim,
+                                                             EquationData::degree_p,
+                                                             EquationData::degree_p + 1,
+                                                             EquationData::degree_p + 1,
+                                                             static_cast<int>(1.5*(EquationData::degree_p + 1)) + 1,
+                                                             LinearAlgebra::distributed::Vector<float>>,
+                              PreconditionIdentity> mg_coarse(cg_mg, mg_matrices[0], identity);
+
+  mg::Matrix<LinearAlgebra::distributed::Vector<float>> mg_matrix(mg_matrices);
+
+  Multigrid<LinearAlgebra::distributed::Vector<float>> mg(mg_matrix, mg_coarse, mg_transfer, mg_smoother, mg_smoother);
+
+  PreconditionMG<dim,
+                 LinearAlgebra::distributed::Vector<float>,
+                 MGTransferMatrixFree<dim, float>> preconditioner(dof_handler_pressure, mg, mg_transfer);
+
+  /*--- Solve the linear system ---*/
+  if(TR_BDF2_stage == 1) {
+    pres_n_gamma.equ(1.0, pres_n);
+    cg.solve(navier_stokes_matrix, pres_n_gamma, rhs_p, preconditioner);
+  }
+  else {
+    pres_n.equ(1.0, pres_n_gamma);
+    cg.solve(navier_stokes_matrix, pres_n, rhs_p, preconditioner);
+  }
+}
+
+
+// This implements the projection step for the gradient of pressure
+//
+template<int dim>
+void NavierStokesProjection<dim>::project_grad(const unsigned int flag) {
+  TimerOutput::Scope t(time_table, "Gradient of pressure projection");
+
+  /*--- The input parameter flag is used just to specify where we want to save the result ---*/
+  AssertIndexRange(flag, 3);
+  Assert(flag > 0, ExcInternalError());
+
+  /*--- We need to select the dof handler related to the velocity since the result lives there ---*/
+  const std::vector<unsigned int> tmp = {0};
+  navier_stokes_matrix.initialize(matrix_free_storage, tmp, tmp);
+
+  if(flag == 1) {
+    navier_stokes_matrix.vmult_grad_p_projection(rhs_u, pres_n);
+  }
+  else if(flag == 2) {
+    navier_stokes_matrix.vmult_grad_p_projection(rhs_u, pres_n_gamma);
+  }
+
+  /*--- We conventionally decide that the this corresponds to third stage ---*/
+  navier_stokes_matrix.set_NS_stage(3);
+
+  /*--- Solve the system ---*/
+  SolverControl solver_control(max_its, 1e-12*rhs_u.l2_norm());
+  SolverCG<LinearAlgebra::distributed::Vector<double>> cg(solver_control);
+  cg.solve(navier_stokes_matrix, u_tmp, rhs_u, PreconditionIdentity());
+}
+
+
+// The following function is used in determining the maximal velocity
+// in order to compute the Courant number.
+//
+template<int dim>
+double NavierStokesProjection<dim>::get_maximal_velocity() {
+  QGaussLobatto<dim> quadrature_formula(EquationData::degree_p + 2);
+  const int n_q_points = quadrature_formula.size();
+
+  std::vector<Vector<double>> velocity_values(n_q_points, Vector<double>(dim));
+
+  FEValues<dim> fe_values_velocity(fe_velocity, quadrature_formula, update_quadrature_points | update_values | update_JxW_values);
+
+  double max_local_velocity = 0.0;
+
+  for(const auto& cell : dof_handler_velocity.active_cell_iterators()) {
+    if(cell->is_locally_owned()) {
+      fe_values_velocity.reinit(cell);
+
+      fe_values_velocity.get_function_values(u_n, velocity_values);
+
+      for(int q = 0; q < n_q_points; q++) {
+        max_local_velocity = std::max(max_local_velocity, std::sqrt(velocity_values[q][0]*velocity_values[q][0] +
+                                                                    velocity_values[q][1]*velocity_values[q][1]));
+      }
+    }
+  }
+
+  const double max_velocity = Utilities::MPI::max(max_local_velocity, MPI_COMM_WORLD);
+
+  return max_velocity;
+}
+
+
+// The following function is used in determining the maximal nodal difference
+// between old and current velocity value in order to see if we have reched steady-state.
+//
+template<int dim>
+double NavierStokesProjection<dim>::get_maximal_difference_velocity() {
+  u_tmp.equ(1.0, u_n);
+  u_tmp.add(-1.0, u_n_minus_1);
+
+  return u_tmp.linfty_norm();
+}
+
+
+// This method plots the current solution. The main difficulty is that we want
+// to create a single output file that contains the data for all velocity
+// components and the pressure. On the other hand, velocities and the pressure
+// live on separate DoFHandler objects, so we need to pay attention when we use
+// 'add_data_vector' to select the proper space.
+//
+template<int dim>
+void NavierStokesProjection<dim>::output_results(const unsigned int step) {
+  TimerOutput::Scope t(time_table, "Output results");
+
+  DataOut<dim> data_out;
+
+  std::vector<std::string> velocity_names(dim, "v");
+  std::vector<DataComponentInterpretation::DataComponentInterpretation>
+  component_interpretation_velocity(dim, DataComponentInterpretation::component_is_part_of_vector);
+  u_n.update_ghost_values();
+
+  data_out.add_data_vector(dof_handler_velocity, u_n, velocity_names, component_interpretation_velocity);
+  pres_n.update_ghost_values();
+  data_out.add_data_vector(dof_handler_pressure, pres_n, "p", {DataComponentInterpretation::component_is_scalar});
+
+  std::vector<std::string> velocity_names_old(dim, "v_old");
+  u_n_minus_1.update_ghost_values();
+  data_out.add_data_vector(dof_handler_velocity, u_n_minus_1, velocity_names_old, component_interpretation_velocity);
+
+  /*--- Here we rely on the postprocessor we have built ---*/
+  PostprocessorVorticity<dim> postprocessor;
+  data_out.add_data_vector(dof_handler_velocity, u_n, postprocessor);
+
+  data_out.build_patches(mapping, EquationData::degree_p + 1, DataOut<dim>::curved_inner_cells);
+
+  const std::string output = "./" + saving_dir + "/solution-" + Utilities::int_to_string(step, 5) + ".vtu";
+  data_out.write_vtu_in_parallel(output, MPI_COMM_WORLD);
+
+  /*--- Serialization ---*/
+  if(save_for_restart) {
+    parallel::distributed::SolutionTransfer<dim, LinearAlgebra::distributed::Vector<double>>
+    solution_transfer_velocity(dof_handler_velocity);
+    parallel::distributed::SolutionTransfer<dim, LinearAlgebra::distributed::Vector<double>>
+    solution_transfer_pressure(dof_handler_pressure);
+
+    u_n.update_ghost_values();
+    u_n_minus_1.update_ghost_values();
+    pres_n.update_ghost_values();
+
+    std::vector<const LinearAlgebra::distributed::Vector<double>*> velocities;
+    velocities.push_back(&u_n);
+    velocities.push_back(&u_n_minus_1);
+    solution_transfer_velocity.prepare_for_serialization(velocities);
+    solution_transfer_pressure.prepare_for_serialization(pres_n);
+
+    triangulation.save("./" + saving_dir + "/solution_ser-" + Utilities::int_to_string(step, 5));
   }
 }
 
@@ -756,7 +928,7 @@ void NavierStokesProjection<dim>::initialize_nearest_boundary_point_mapping(){
 }
 
 
-// Compute y plus
+// Compute y plus. TODO: Modify 'normal_vector' for round cylinder
 //
 template <int dim>
 void NavierStokesProjection<dim>::compute_y_plus(LinearAlgebra::distributed::Vector<double>& vel,
@@ -855,265 +1027,111 @@ void NavierStokesProjection<dim>::compute_y_plus(LinearAlgebra::distributed::Vec
 }
 
 
-// This function computes the extrapolated velocity to be used in the momentum predictor
+// Compute maximal local vorticity
 //
 template<int dim>
-void NavierStokesProjection<dim>::interpolate_velocity() {
-  TimerOutput::Scope t(time_table, "Interpolate velocity");
+void NavierStokesProjection<dim>::compute_lipschitz_number() {
+  QGaussLobatto<dim> quadrature_formula(EquationData::degree_p + 2);
+  const int n_q_points = quadrature_formula.size();
 
-  //--- TR-BDF2 first step
-  if(TR_BDF2_stage == 1) {
-    u_extr.equ(1.0 + gamma/(2.0*(1.0 - gamma)), u_n);
-    u_tmp.equ(gamma/(2.0*(1.0 - gamma)), u_n_minus_1);
-    u_extr.add(-1.0, u_tmp);
-  }
-  //--- TR-BDF2 second step
-  else {
-    u_extr.equ(1.0 + (1.0 - gamma)/gamma, u_n_gamma);
-    u_tmp.equ((1.0 - gamma)/gamma, u_n);
-    u_extr.add(-1.0, u_tmp);
-  }
-}
+  std::vector<std::vector<Tensor<1, dim, double>>> solution_gradients_velocity(n_q_points, std::vector<Tensor<1, dim, double>>(dim));
 
+  FEValues<dim> fe_values(mapping, fe_velocity, quadrature_formula, update_gradients);
 
-// We are finally ready to solve the diffusion step.
-//
-template<int dim>
-void NavierStokesProjection<dim>::diffusion_step() {
-  TimerOutput::Scope t(time_table, "Diffusion step");
+  double max_local_vorticity = std::numeric_limits<double>::min();
 
-  /*--- We first speicify that we want to deal with velocity dof_handler (index 0, since it is the first one
-        in the 'dof_handlers' vector) ---*/
-  const std::vector<unsigned int> tmp = {0};
-  navier_stokes_matrix.initialize(matrix_free_storage, tmp, tmp);
+  for(const auto& cell: dof_handler_velocity.active_cell_iterators()) {
+    if(cell->is_locally_owned()) {
+      fe_values.reinit(cell);
+      fe_values.get_function_gradients(u_n, solution_gradients_velocity);
 
-  /*--- Next, we specify at we are at stage 1, namely the diffusion step ---*/
-  navier_stokes_matrix.set_NS_stage(1);
-
-  /*--- Now, we compute the right-hand side and we set the convective velocity. The necessity of 'set_u_extr' is
-        that this quantity is required in the bilinear forms and we can't use a vector of src like on the right-hand side,
-        so it has to be available ---*/
-  if(TR_BDF2_stage == 1) {
-    navier_stokes_matrix.vmult_rhs_velocity(rhs_u, {u_n, u_extr, pres_n, deltas, y_plus});
-    navier_stokes_matrix.set_u_extr(u_extr);
-    u_star.equ(1.0, u_extr);
-  }
-  else {
-    navier_stokes_matrix.vmult_rhs_velocity(rhs_u, {u_n, u_n_gamma, pres_n_gamma, u_extr, deltas, y_plus});
-    navier_stokes_matrix.set_u_extr(u_extr);
-    u_star.equ(1.0, u_extr);
-  }
-
-  /*--- Build the linear solver; in this case we specifiy the maximum number of iterations and residual ---*/
-  SolverControl solver_control(max_its, eps*rhs_u.l2_norm());
-  SolverGMRES<LinearAlgebra::distributed::Vector<double>> gmres(solver_control);
-
-  /*--- Build a Jacobi preconditioner and solve ---*/
-  PreconditionJacobi<NavierStokesProjectionOperator<dim,
-                                                    EquationData::degree_p,
-                                                    EquationData::degree_p + 1,
-                                                    EquationData::degree_p + 1,
-                                                    EquationData::degree_p + 2,
-                                                    LinearAlgebra::distributed::Vector<double>>> preconditioner;
-  navier_stokes_matrix.compute_diagonal();
-  preconditioner.initialize(navier_stokes_matrix);
-
-  gmres.solve(navier_stokes_matrix, u_star, rhs_u, preconditioner);
-}
-
-
-// Next, we solve the projection step.
-//
-template<int dim>
-void NavierStokesProjection<dim>::projection_step() {
-  TimerOutput::Scope t(time_table, "Projection step pressure");
-
-  /*--- We start in the same way of 'diffusion_step': we first reinitialize with the index of FE space,
-        we specify that this is the second stage and we compute the right-hand side ---*/
-  const std::vector<unsigned int> tmp = {1};
-  navier_stokes_matrix.initialize(matrix_free_storage, tmp, tmp);
-
-  navier_stokes_matrix.set_NS_stage(2);
-
-  if(TR_BDF2_stage == 1) {
-    navier_stokes_matrix.vmult_rhs_pressure(rhs_p, {u_star, pres_n});
-  }
-  else {
-    navier_stokes_matrix.vmult_rhs_pressure(rhs_p, {u_star, pres_n_gamma});
-  }
-
-  /*--- Build the linear solver (Conjugate Gradient in this case) ---*/
-  SolverControl solver_control(max_its, eps*rhs_p.l2_norm());
-  SolverCG<LinearAlgebra::distributed::Vector<double>> cg(solver_control);
-
-  /*--- Build the preconditioner (as in step-37) ---*/
-  MGTransferMatrixFree<dim, float> mg_transfer;
-  mg_transfer.build(dof_handler_pressure);
-
-  using SmootherType = PreconditionChebyshev<NavierStokesProjectionOperator<dim,
-                                                                            EquationData::degree_p,
-                                                                            EquationData::degree_p + 1,
-                                                                            EquationData::degree_p + 1,
-                                                                            EquationData::degree_p + 2,
-                                                                            LinearAlgebra::distributed::Vector<float>>,
-                                             LinearAlgebra::distributed::Vector<float>>;
-  mg::SmootherRelaxation<SmootherType, LinearAlgebra::distributed::Vector<float>> mg_smoother;
-  MGLevelObject<typename SmootherType::AdditionalData> smoother_data;
-  smoother_data.resize(0, triangulation.n_global_levels() - 1);
-  for(unsigned int level = 0; level < triangulation.n_global_levels(); ++level) {
-    if(level > 0) {
-      smoother_data[level].smoothing_range     = 15.0;
-      smoother_data[level].degree              = 3;
-      smoother_data[level].eig_cg_n_iterations = 10;
+      for(unsigned int q = 0; q < n_q_points; ++q) {
+        max_local_vorticity = std::max(max_local_vorticity,
+                                       std::abs(solution_gradients_velocity[q][1][0] - solution_gradients_velocity[q][0][1])*dt);
+      }
     }
-    else {
-      smoother_data[0].smoothing_range     = 2e-2;
-      smoother_data[0].degree              = numbers::invalid_unsigned_int;
-      smoother_data[0].eig_cg_n_iterations = mg_matrices[0].m();
+  }
+
+  const double lipschitz = Utilities::MPI::max(max_local_vorticity, MPI_COMM_WORLD);
+  if(Utilities::MPI::this_mpi_process(MPI_COMM_WORLD) == 0) {
+    output_lipschitz << lipschitz << std::endl;
+  }
+}
+
+// @sect{<code>NavierStokesProjection::compute_lift_and_drag</code>}
+
+// This routine computes the lift and the drag forces in a non-dimensional framework
+// (so basically for the classical coefficients, it is necessary to multiply by a factor 2).
+//
+template<int dim>
+void NavierStokesProjection<dim>::compute_lift_and_drag() {
+  QGauss<dim - 1> face_quadrature_formula(EquationData::degree_p + 2);
+  const int n_q_points = face_quadrature_formula.size();
+
+  std::vector<double>                      pressure_values(n_q_points);
+  std::vector<std::vector<Tensor<1, dim>>> velocity_gradients(n_q_points, std::vector<Tensor<1, dim>>(dim));
+
+  Tensor<1, dim> normal_vector;
+  Tensor<2, dim> fluid_stress;
+  Tensor<2, dim> fluid_pressure;
+  Tensor<1, dim> forces;
+
+  /*--- We need to compute the integral over the cylinder boundary, so we need to use 'FEFaceValues' instances.
+        For the velocity we need the gradients, for the pressure the values. ---*/
+  FEFaceValues<dim> fe_face_values_velocity(fe_velocity, face_quadrature_formula,
+                                            update_quadrature_points | update_gradients |
+                                            update_JxW_values | update_normal_vectors);
+  FEFaceValues<dim> fe_face_values_pressure(fe_pressure, face_quadrature_formula, update_values);
+
+  double local_drag = 0.0;
+  double local_lift = 0.0;
+
+  /*--- We need to perform a unique loop because the whole stress tensor takes into account contributions of
+        velocity and pressure obviously. However, the two dof_handlers are different, so we neede to create an ad-hoc
+        iterator for the pressure that we update manually. It is guaranteed that the cells are visited in the same order
+        (see the documentation) ---*/
+  auto tmp_cell = dof_handler_pressure.begin_active();
+  for(const auto& cell : dof_handler_velocity.active_cell_iterators()) {
+    if(cell->is_locally_owned()) {
+      for(unsigned int face = 0; face < GeometryInfo<dim>::faces_per_cell; ++face) {
+        if(cell->face(face)->at_boundary() && cell->face(face)->boundary_id() == 4) {
+          fe_face_values_velocity.reinit(cell, face);
+          fe_face_values_pressure.reinit(tmp_cell, face);
+
+          fe_face_values_velocity.get_function_gradients(u_n, velocity_gradients); /*--- velocity gradients ---*/
+          fe_face_values_pressure.get_function_values(pres_n, pressure_values); /*--- pressure values ---*/
+
+          for(int q = 0; q < n_q_points; q++) {
+            normal_vector = -fe_face_values_velocity.normal_vector(q);
+
+            for(unsigned int d = 0; d < dim; ++ d) {
+              fluid_pressure[d][d] = pressure_values[q];
+              for(unsigned int k = 0; k < dim; ++k)
+                fluid_stress[d][k] = 1.0/Re*velocity_gradients[q][d][k];
+            }
+            fluid_stress = fluid_stress - fluid_pressure;
+
+            forces = fluid_stress*normal_vector*fe_face_values_velocity.JxW(q);
+
+            local_drag += forces[0];
+            local_lift += forces[1];
+          }
+        }
+      }
     }
-    mg_matrices[level].compute_diagonal();
-    smoother_data[level].preconditioner = mg_matrices[level].get_matrix_diagonal_inverse();
+    ++tmp_cell;
   }
-  mg_smoother.initialize(mg_matrices, smoother_data);
 
-  PreconditionIdentity                                identity;
-  SolverCG<LinearAlgebra::distributed::Vector<float>> cg_mg(solver_control);
-  MGCoarseGridIterativeSolver<LinearAlgebra::distributed::Vector<float>,
-                              SolverCG<LinearAlgebra::distributed::Vector<float>>,
-                              NavierStokesProjectionOperator<dim,
-                                                             EquationData::degree_p,
-                                                             EquationData::degree_p + 1,
-                                                             EquationData::degree_p + 1,
-                                                             EquationData::degree_p + 2,
-                                                             LinearAlgebra::distributed::Vector<float>>,
-                              PreconditionIdentity> mg_coarse(cg_mg, mg_matrices[0], identity);
-
-  mg::Matrix<LinearAlgebra::distributed::Vector<float>> mg_matrix(mg_matrices);
-
-  Multigrid<LinearAlgebra::distributed::Vector<float>> mg(mg_matrix, mg_coarse, mg_transfer, mg_smoother, mg_smoother);
-
-  PreconditionMG<dim,
-                 LinearAlgebra::distributed::Vector<float>,
-                 MGTransferMatrixFree<dim, float>> preconditioner(dof_handler_pressure, mg, mg_transfer);
-
-  /*--- Solve the linear system ---*/
-  if(TR_BDF2_stage == 1) {
-    pres_n_gamma.equ(1.0, pres_n);
-    cg.solve(navier_stokes_matrix, pres_n_gamma, rhs_p, preconditioner);
-  }
-  else {
-    pres_n.equ(1.0, pres_n_gamma);
-    cg.solve(navier_stokes_matrix, pres_n, rhs_p, preconditioner);
+  /*--- At the end, each processor has computed the contribution to the boundary cells it owns and, therefore,
+        we need to sum up all the contributions. ---*/
+  const double lift = Utilities::MPI::sum(local_lift, MPI_COMM_WORLD);
+  const double drag = Utilities::MPI::sum(local_drag, MPI_COMM_WORLD);
+  if(Utilities::MPI::this_mpi_process(MPI_COMM_WORLD) == 0) {
+    output_lift << lift << std::endl;
+    output_drag << drag << std::endl;
   }
 }
 
-
-// This implements the projection step for the gradient of pressure
-//
-template<int dim>
-void NavierStokesProjection<dim>::project_grad(const unsigned int flag) {
-  TimerOutput::Scope t(time_table, "Gradient of pressure projection");
-
-  /*--- The input parameter flag is used just to specify where we want to save the result ---*/
-  AssertIndexRange(flag, 3);
-  Assert(flag > 0, ExcInternalError());
-
-  /*--- We need to select the dof handler related to the velocity since the result lives there ---*/
-  const std::vector<unsigned int> tmp = {0};
-  navier_stokes_matrix.initialize(matrix_free_storage, tmp, tmp);
-
-  if(flag == 1) {
-    navier_stokes_matrix.vmult_grad_p_projection(rhs_u, pres_n);
-  }
-  else if(flag == 2) {
-    navier_stokes_matrix.vmult_grad_p_projection(rhs_u, pres_n_gamma);
-  }
-
-  /*--- We conventionally decide that the this corresponds to third stage ---*/
-  navier_stokes_matrix.set_NS_stage(3);
-
-  /*--- Solve the system ---*/
-  SolverControl solver_control(max_its, 1e-12*rhs_u.l2_norm());
-  SolverCG<LinearAlgebra::distributed::Vector<double>> cg(solver_control);
-  cg.solve(navier_stokes_matrix, u_tmp, rhs_u, PreconditionIdentity());
-}
-
-
-// The following function is used in determining the maximal velocity
-// in order to compute the Courant number.
-//
-template<int dim>
-double NavierStokesProjection<dim>::get_maximal_velocity() {
-  return u_n.linfty_norm();
-}
-
-
-// The following function is used in determining the maximal nodal difference
-// between old and current velocity value in order to see if we have reched steady-state.
-//
-template<int dim>
-double NavierStokesProjection<dim>::get_maximal_difference_velocity() {
-  u_tmp.equ(1.0, u_n);
-  u_tmp.add(-1.0, u_n_minus_1);
-
-  return u_tmp.linfty_norm();
-}
-
-
-// This method plots the current solution. The main difficulty is that we want
-// to create a single output file that contains the data for all velocity
-// components and the pressure. On the other hand, velocities and the pressure
-// live on separate DoFHandler objects, so we need to pay attention when we use
-// 'add_data_vector' to select the proper space.
-//
-template<int dim>
-void NavierStokesProjection<dim>::output_results(const unsigned int step) {
-  TimerOutput::Scope t(time_table, "Output results");
-
-  DataOut<dim> data_out;
-
-  std::vector<std::string> velocity_names(dim, "v");
-  std::vector<DataComponentInterpretation::DataComponentInterpretation>
-  component_interpretation_velocity(dim, DataComponentInterpretation::component_is_part_of_vector);
-  u_n.update_ghost_values();
-
-  data_out.add_data_vector(dof_handler_velocity, u_n, velocity_names, component_interpretation_velocity);
-  pres_n.update_ghost_values();
-  data_out.add_data_vector(dof_handler_pressure, pres_n, "p", {DataComponentInterpretation::component_is_scalar});
-
-  std::vector<std::string> velocity_names_old(dim, "v_old");
-  u_n_minus_1.update_ghost_values();
-  data_out.add_data_vector(dof_handler_velocity, u_n_minus_1, velocity_names_old, component_interpretation_velocity);
-
-  /*--- Here we rely on the postprocessor we have built ---*/
-  PostprocessorVorticity<dim> postprocessor;
-  data_out.add_data_vector(dof_handler_velocity, u_n, postprocessor);
-
-  data_out.build_patches(MappingQ1<dim>(), EquationData::degree_p + 1, DataOut<dim>::curved_inner_cells);
-
-  const std::string output = "./" + saving_dir + "/solution-" + Utilities::int_to_string(step, 5) + ".vtu";
-  data_out.write_vtu_in_parallel(output, MPI_COMM_WORLD);
-
-  /*--- Serialization ---*/
-  if(save_for_restart) {
-    parallel::distributed::SolutionTransfer<dim, LinearAlgebra::distributed::Vector<double>>
-    solution_transfer_velocity(dof_handler_velocity);
-    parallel::distributed::SolutionTransfer<dim, LinearAlgebra::distributed::Vector<double>>
-    solution_transfer_pressure(dof_handler_pressure);
-
-    u_n.update_ghost_values();
-    u_n_minus_1.update_ghost_values();
-    pres_n.update_ghost_values();
-
-    std::vector<const LinearAlgebra::distributed::Vector<double>*> velocities;
-    velocities.push_back(&u_n);
-    velocities.push_back(&u_n_minus_1);
-    solution_transfer_velocity.prepare_for_serialization(velocities);
-    solution_transfer_pressure.prepare_for_serialization(pres_n);
-
-    triangulation.save("./" + saving_dir + "/solution_ser-" + Utilities::int_to_string(step, 5));
-  }
-}
 
 // This method saves the statistics
 //
@@ -1159,16 +1177,20 @@ void NavierStokesProjection<dim>::output_statistics(Point<dim> center) {
       /*--- Output average along cylinder boundary ---*/
       for(unsigned int i = 0; i < obstacle_points.size(); i++) {
         /*--- Output pressure average ---*/
-        output_avg_pressure << obstacle_points[i][0] << " " << obstacle_points[i][1] << " " << avg_pressure[i] << std::endl;
+        output_avg_pressure << obstacle_points[i][0] << " " << obstacle_points[i][1] << " "
+                            << avg_pressure[i] << std::endl;
 
         /*--- Output Cf average ---*/
-        output_Cf << obstacle_points[i][0] << " " << obstacle_points[i][1] << " " << avg_stress[i] * 2.0 /(Re * U_inf * U_inf) << std::endl;
+        output_Cf << obstacle_points[i][0] << " " << obstacle_points[i][1] << " "
+                  << avg_stress[i] * 2.0 /(Re * U_inf * U_inf) << std::endl;
 
         /*--- Output stress average ---*/
-        output_avg_stress << obstacle_points[i][0] << " " << obstacle_points[i][1] << " " << avg_stress[i] << std::endl;
+        output_avg_stress << obstacle_points[i][0] << " " << obstacle_points[i][1] << " "
+                          << avg_stress[i] << std::endl;
 
         /*--- Output Cp average ---*/
-        output_Cp << obstacle_points[i][0] << " " << obstacle_points[i][1] << " " << 2.0 * (avg_pressure[i] - p_inf) / (U_inf*U_inf) << std::endl;
+        output_Cp << obstacle_points[i][0] << " " << obstacle_points[i][1] << " "
+                  << 2.0*(avg_pressure[i] - p_inf) / (U_inf*U_inf) << std::endl;
       }
 
       /*--- Output average velocity horizontal wake points ---*/
@@ -1212,7 +1234,8 @@ void NavierStokesProjection<dim>::output_statistics(Point<dim> center) {
   }
 }
 
-// Initialize the points of interest around the obstacle
+
+// Initialize the points of interest around the obstacle. TODO: Modify 'obstacle points' for round cylinder
 //
 template<int dim>
 void NavierStokesProjection<dim>::initialize_points_around_obstacle(const unsigned int n_points, Point<dim> start, double dx) {
@@ -1255,29 +1278,26 @@ std::vector<Point<dim>> NavierStokesProjection<dim>::initialize_profile_points(d
         GridTools::find_active_cell_around_point(triangulation, p)->is_locally_owned()) {
       profile_points.push_back(p);
     }
-    p[0] = p[0] + spacing * std::cos(angle);
-    p[1] = p[1] + spacing * std::sin(angle);
+    p[0] = p[0] + spacing*std::cos(angle);
+    p[1] = p[1] + spacing*std::sin(angle);
   }
 
   return profile_points;
 }
 
 
-// pressure average over time
+// Compute pressure average over time for specific points
 //
 template<int dim>
-void NavierStokesProjection<dim>::compute_pressure_avg_over_boundary(int n, double height, int n_points) {
+void NavierStokesProjection<dim>::compute_pressure_avg_over_boundary(int n) {
   double avg_pres = 0.0;
   for(unsigned int i = 0; i < obstacle_points.size(); i++) {
-    for(int j = 0; j < n_points; j++) {
-      if(dim == 3) {
-        obstacle_points[i][2] = j * (height / (n_points-1));
-      }
-      if(GridTools::find_active_cell_around_point(triangulation, obstacle_points[i]) != triangulation.end() &&
-         GridTools::find_active_cell_around_point(triangulation, obstacle_points[i])->is_locally_owned())  {
-          avg_pres += VectorTools::point_value(dof_handler_pressure, pres_n, obstacle_points[i]) / n_points;
-      }
+    /*--- Compute pressure average around obstacle points ---*/
+    if(GridTools::find_active_cell_around_point(triangulation, obstacle_points[i]) != triangulation.end() &&
+       GridTools::find_active_cell_around_point(triangulation, obstacle_points[i])->is_locally_owned()) {
+        avg_pres += VectorTools::point_value(dof_handler_pressure, pres_n, obstacle_points[i]);
     }
+    /*--- Update time average ---*/
     if(GridTools::find_active_cell_around_point(triangulation, obstacle_points[i]) != triangulation.end() &&
        GridTools::find_active_cell_around_point(triangulation, obstacle_points[i])->is_locally_owned())  {
       if(n > 1) {
@@ -1290,7 +1310,7 @@ void NavierStokesProjection<dim>::compute_pressure_avg_over_boundary(int n, doub
   }
 }
 
-// stress average over time over boundary
+// Compute stress average over time over boundary. TODO: Modify 'normal_vector' for round cylinder
 //
 template<int dim>
 void NavierStokesProjection<dim>::compute_stress_avg_over_boundary(int n, Point<dim> center, double object_length,
@@ -1364,7 +1384,7 @@ void NavierStokesProjection<dim>::compute_stress_avg_over_boundary(int n, Point<
   }
 }
 
-// velocity average over time
+// Compute velocity average over time for specific points
 //
 template<int dim>
 void NavierStokesProjection<dim>::compute_velocity_avg(int n, std::vector<Point<dim>>& points, std::vector<Vector<double>>& avg_velocity) {
@@ -1383,108 +1403,6 @@ void NavierStokesProjection<dim>::compute_velocity_avg(int n, std::vector<Point<
         avg_velocity.push_back(vel);
       }
     }
-  }
-}
-
-// compute maximal local voriticity
-//
-template<int dim>
-void NavierStokesProjection<dim>::compute_lipschitz_number() {
-  FEValues<dim> fe_values(fe_velocity, quadrature_velocity, update_gradients);
-  std::vector<std::vector<Tensor<1, dim, double>>> solution_gradients_velocity(quadrature_velocity.size(),
-                                                                               std::vector<Tensor<1, dim, double>>(dim));
-
-  double max_local_vorticity = std::numeric_limits<double>::min();
-
-  for(const auto& cell: dof_handler_velocity.active_cell_iterators()) {
-    if(cell->is_locally_owned()) {
-      fe_values.reinit(cell);
-      fe_values.get_function_gradients(u_n, solution_gradients_velocity);
-
-      for(unsigned int q = 0; q < quadrature_velocity.size(); ++q) {
-        max_local_vorticity = std::max(max_local_vorticity,
-                                       std::abs(solution_gradients_velocity[q][1][0] - solution_gradients_velocity[q][0][1])*dt);
-      }
-    }
-  }
-
-  const double lipschitz = Utilities::MPI::max(max_local_vorticity, MPI_COMM_WORLD);
-  if(Utilities::MPI::this_mpi_process(MPI_COMM_WORLD) == 0) {
-    output_lipschitz << lipschitz << std::endl;
-  }
-}
-
-// @sect{<code>NavierStokesProjection::compute_lift_and_drag</code>}
-
-// This routine computes the lift and the drag forces in a non-dimensional framework
-// (so basically for the classical coefficients, it is necessary to multiply by a factor 2).
-//
-template<int dim>
-void NavierStokesProjection<dim>::compute_lift_and_drag() {
-  QGauss<dim - 1> face_quadrature_formula(EquationData::degree_p + 2);
-  const int n_q_points = face_quadrature_formula.size();
-
-  std::vector<double>                      pressure_values(n_q_points);
-  std::vector<std::vector<Tensor<1, dim>>> velocity_gradients(n_q_points, std::vector<Tensor<1, dim>>(dim));
-
-  Tensor<1, dim> normal_vector;
-  Tensor<2, dim> fluid_stress;
-  Tensor<2, dim> fluid_pressure;
-  Tensor<1, dim> forces;
-
-  /*--- We need to compute the integral over the cylinder boundary, so we need to use 'FEFaceValues' instances.
-        For the velocity we need the gradients, for the pressure the values. ---*/
-  FEFaceValues<dim> fe_face_values_velocity(fe_velocity, face_quadrature_formula,
-                                            update_quadrature_points | update_gradients |
-                                            update_JxW_values | update_normal_vectors);
-  FEFaceValues<dim> fe_face_values_pressure(fe_pressure, face_quadrature_formula, update_values);
-
-  double local_drag = 0.0;
-  double local_lift = 0.0;
-
-  /*--- We need to perform a unique loop because the whole stress tensor takes into account contributions of
-        velocity and pressure obviously. However, the two dof_handlers are different, so we neede to create an ad-hoc
-        iterator for the pressure that we update manually. It is guaranteed that the cells are visited in the same order
-        (see the documentation) ---*/
-  auto tmp_cell = dof_handler_pressure.begin_active();
-  for(const auto& cell : dof_handler_velocity.active_cell_iterators()) {
-    if(cell->is_locally_owned()) {
-      for(unsigned int face = 0; face < GeometryInfo<dim>::faces_per_cell; ++face) {
-        if(cell->face(face)->at_boundary() && cell->face(face)->boundary_id() == 2) {
-          fe_face_values_velocity.reinit(cell, face);
-          fe_face_values_pressure.reinit(tmp_cell, face);
-
-          fe_face_values_velocity.get_function_gradients(u_n, velocity_gradients); /*--- velocity gradients ---*/
-          fe_face_values_pressure.get_function_values(pres_n, pressure_values); /*--- pressure values ---*/
-
-          for(int q = 0; q < n_q_points; q++) {
-            normal_vector = -fe_face_values_velocity.normal_vector(q);
-
-            for(unsigned int d = 0; d < dim; ++ d) {
-              fluid_pressure[d][d] = pressure_values[q];
-              for(unsigned int k = 0; k < dim; ++k)
-                fluid_stress[d][k] = 1.0/Re*velocity_gradients[q][d][k];
-            }
-            fluid_stress = fluid_stress - fluid_pressure;
-
-            forces = fluid_stress*normal_vector*fe_face_values_velocity.JxW(q);
-
-            local_drag += forces[0];
-            local_lift += forces[1];
-          }
-        }
-      }
-    }
-    ++tmp_cell;
-  }
-
-  /*--- At the end, each processor has computed the contribution to the boundary cells it owns and, therefore,
-        we need to sum up all the contributions. ---*/
-  const double lift = Utilities::MPI::sum(local_lift, MPI_COMM_WORLD);
-  const double drag = Utilities::MPI::sum(local_drag, MPI_COMM_WORLD);
-  if(Utilities::MPI::this_mpi_process(MPI_COMM_WORLD) == 0) {
-    output_lift << lift << std::endl;
-    output_drag << drag << std::endl;
   }
 }
 
@@ -1555,24 +1473,8 @@ void NavierStokesProjection<dim>::run(const bool verbose, const unsigned int out
   /*--- Geometrical configuration ---*/
   initialize_nearest_boundary_point_mapping();
 
-  Point<dim> center;
-  double radius, length, height, y_start;
-
-  radius = 0.5;
-  height = 20.0;
-  length = 30.0;
-
-  if(import_mesh) {
-    center  = Point<dim>(0.0, 0.0);
-    y_start = -10.0;
-  }
-  else {
-    center  = Point<dim>(10.0, 10.0);
-    y_start = 0.0;
-  }
-
   /*--- Initialize points for statistics ---*/
-  verbose_cout << " Initialize statistics points" << std::endl;
+  /*verbose_cout << " Initialize statistics points" << std::endl;
   initialize_points_around_obstacle(200, Point<dim>(center[0] - radius, center[1] - radius), 2.0 * radius);
   horizontal_wake_points   = initialize_profile_points(0.0, 0.1,
                                                        Point<dim>(center[0] + radius, 0.5 * height),
@@ -1585,7 +1487,7 @@ void NavierStokesProjection<dim>::run(const bool verbose, const unsigned int out
                                                        Point<dim>(center[1] + 1.54 * 2.0 * radius, height));
   vertical_profile_points3 = initialize_profile_points(0.5 * numbers::PI, 0.1,
                                                        Point<dim>(center[0] + 2.02 * 2.0 * radius, 0.0),
-                                                       Point<dim>(center[1] + 2.02 * 2.0 * radius, height));
+                                                       Point<dim>(center[1] + 2.02 * 2.0 * radius, height));*/
 
   /*--- Perform the effective loop ---*/
   double time = t_0 + dt;
@@ -1594,17 +1496,17 @@ void NavierStokesProjection<dim>::run(const bool verbose, const unsigned int out
     n    = step_restart;
     time = time_restart;
 
-    read_statistics_velocity(horizontal_wake_points, 0, avg_horizontal_velocity, "./" + saving_dir + "/out_vel_hor.dat");
+    /*read_statistics_velocity(horizontal_wake_points, 0, avg_horizontal_velocity, "./" + saving_dir + "/out_vel_hor.dat");
     read_statistics_velocity(vertical_profile_points1, 1, avg_vertical_velocity1, "./" + saving_dir + "/out_vel_ver1.dat");
     read_statistics_velocity(vertical_profile_points2, 1, avg_vertical_velocity2, "./" + saving_dir + "/out_vel_ver2.dat");
     read_statistics_velocity(vertical_profile_points3, 1, avg_vertical_velocity3, "./" + saving_dir + "/out_vel_ver3.dat");
 
     read_statistics(obstacle_points, avg_stress, "./" + saving_dir + "/avg_stress.dat");
-    read_statistics(obstacle_points, avg_pressure, "./" + saving_dir + "/avg_p.dat");
+    read_statistics(obstacle_points, avg_pressure, "./" + saving_dir + "/avg_p.dat");*/
   }
   else {
     output_results(1);
-    compute_y_plus(u_n, y_start, y_start + height, center, 2.0 * radius);
+    /*compute_y_plus(u_n, y_start, y_start + height, center, 2.0 * radius);
 
     verbose_cout << "Compute statistics" << std::endl;
     compute_pressure_avg_over_boundary(n);
@@ -1612,7 +1514,7 @@ void NavierStokesProjection<dim>::run(const bool verbose, const unsigned int out
     compute_velocity_avg(n, horizontal_wake_points, avg_horizontal_velocity);
     compute_velocity_avg(n, vertical_profile_points1, avg_vertical_velocity1);
     compute_velocity_avg(n, vertical_profile_points2, avg_vertical_velocity2);
-    compute_velocity_avg(n, vertical_profile_points3, avg_vertical_velocity3);
+    compute_velocity_avg(n, vertical_profile_points3, avg_vertical_velocity3);*/
   }
   while(std::abs(T - time) > 1e-10) {
     time += dt;
@@ -1626,8 +1528,8 @@ void NavierStokesProjection<dim>::run(const bool verbose, const unsigned int out
       mg_matrices[level].set_TR_BDF2_stage(TR_BDF2_stage);
     }
 
-    verbose_cout << "  Computing y+ stage 1" << std::endl;
-    compute_y_plus(u_n, y_start, y_start + height, center, 2.0*radius);
+    /*verbose_cout << "  Computing y+ stage 1" << std::endl;
+    compute_y_plus(u_n, y_start, y_start + height, center, 2.0*radius);*/
 
     verbose_cout << "  Interpolating the velocity stage 1" << std::endl;
     interpolate_velocity();
@@ -1656,8 +1558,8 @@ void NavierStokesProjection<dim>::run(const bool verbose, const unsigned int out
     }
     navier_stokes_matrix.set_TR_BDF2_stage(TR_BDF2_stage);
 
-    verbose_cout << "  Computing y+ stage 2" << std::endl;
-    compute_y_plus(u_n_gamma, y_start, y_start + height, center, 2.0*radius);
+    /*verbose_cout << "  Computing y+ stage 2" << std::endl;
+    compute_y_plus(u_n_gamma, y_start, y_start + height, center, 2.0*radius);*/
 
     verbose_cout << "  Interpolating the velocity stage 2" << std::endl;
     interpolate_velocity();
@@ -1684,21 +1586,21 @@ void NavierStokesProjection<dim>::run(const bool verbose, const unsigned int out
 
     /*--- Now we focus on the statistics ---*/
     compute_lift_and_drag();
+    // compute lipschitz number at every timestep
+    compute_lipschitz_number();
     // compute time average of parameters along different points
-    compute_pressure_avg_over_boundary(n);
+    /*compute_pressure_avg_over_boundary(n);
     compute_stress_avg_over_boundary(n, center, 2.0 * radius, y_start, y_start + height);
     compute_velocity_avg(n, horizontal_wake_points, avg_horizontal_velocity);
     compute_velocity_avg(n, vertical_profile_points1, avg_vertical_velocity1);
     compute_velocity_avg(n, vertical_profile_points2, avg_vertical_velocity2);
-    compute_velocity_avg(n, vertical_profile_points3, avg_vertical_velocity3);
-    // compute lipschitz number at every timestep
-    compute_lipschitz_number();
+    compute_velocity_avg(n, vertical_profile_points3, avg_vertical_velocity3);*/
 
     /*--- Save the results ---*/
     if(n % output_interval == 0) {
       verbose_cout << "Plotting Solution final" << std::endl;
       output_results(n);
-      output_statistics(center);
+      //output_statistics(center);
     }
     /*--- In case dt is not a multiple of T, we reduce dt in order to end up at T ---*/
     if(T - time < dt && T - time > 1e-10) {
@@ -1712,7 +1614,7 @@ void NavierStokesProjection<dim>::run(const bool verbose, const unsigned int out
   if(n % output_interval != 0) {
     verbose_cout << "Plotting Solution final" << std::endl;
     output_results(n);
-    output_statistics(center);
+    //output_statistics(center);
   }
 }
 

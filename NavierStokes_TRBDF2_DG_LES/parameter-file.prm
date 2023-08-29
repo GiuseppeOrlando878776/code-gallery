@@ -2,24 +2,23 @@ subsection Physical data
   # In this subsection we declare the physical data
   # The initial and final time, and the Reynolds number
   set initial_time = 0.0
-  set final_time   = 300.0
+  set final_time   = 60.0
   set Reynolds     = 100.0
+  set Mach         = 0.001
   set Cs2          = 0.01
 end
 
 subsection Time step data
   # In this subsection we declare the data that is to be used for time discretization,
   # i.e. the time step dt
-  set dt           = 5.0e-3
-  set time_restart = 0.0
+  set dt = 1.0e-2
 end
 
 subsection Space discretization
   # In this subsection we declare the data that is relevant to the space discretization
   # we set the number of global refines the triangulation must have
   # and the degree k of the pair Q_(k+1)--Q_k of velocity--pressure finite element spaces
-  set n_of_refines = 2
-  set import_mesh  = false
+  set n_of_refines = 0
 end
 
 subsection Data solve
@@ -27,20 +26,16 @@ subsection Data solve
   # for the velocity.
   set max_iterations        = 10000  # maximal number of iterations that linear solvers must make
   set eps                   = 1e-8   # stopping criterion
-  set step_restart          = 60000
-  set tolerance_fixed_point = 1e-8
+  set step_restart          = 6000
 end
 
-set saving directory = Re100_LES
+set saving directory = Re100_LES_cylinder
 
 #The output frequency
 set output_interval = 6000
 
 #Finally we set the verbosity level
 set verbose = true
-
-#Set if the restart is done just specifying an initialization
-set as_initial_conditions = true
 
 #Set whether we are in presence of a restart or not
 set restart = false

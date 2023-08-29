@@ -216,7 +216,7 @@ NavierStokesProjection<dim>::NavierStokesProjection(RunTimeParameters::Data_Stor
   fe_pressure(FE_DGQ<dim>(EquationData::degree_p), 1),
   dof_handler_velocity(triangulation),
   dof_handler_pressure(triangulation),
-  mapping()
+  mapping(),
   navier_stokes_matrix(data),
   max_its(data.max_iterations),
   eps(data.eps),

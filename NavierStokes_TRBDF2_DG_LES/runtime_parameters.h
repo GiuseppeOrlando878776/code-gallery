@@ -20,10 +20,11 @@ namespace RunTimeParameters {
     double final_time;   /*--- Final time ---*/
 
     double Reynolds; /*--- Reynolds number ---*/
+    double Mach;     /*--- Mach number ---*/
     double dt;       /*--- Time step ---*/
     double Cs2;      /*--- Smagorinsky constant ---*/
 
-    unsigned int n_refines;            /*--- Number of refinements ---*/
+    unsigned int n_refines;           /*--- Number of refinements ---*/
     unsigned int max_loc_refinements; /*--- Number of maximum local refinements allowed ---*/
     unsigned int min_loc_refinements; /*--- Number of minimum local refinements allowed
                                             once reached that level ---*/
@@ -58,6 +59,7 @@ namespace RunTimeParameters {
   Data_Storage::Data_Storage(): initial_time(0.0),
                                 final_time(1.0),
                                 Reynolds(1.0),
+                                Mach(1.0),
                                 dt(5e-4),
                                 Cs2(0.01),
                                 n_refines(0),
@@ -89,6 +91,10 @@ namespace RunTimeParameters {
                         "1.0",
                         Patterns::Double(0.0),
                         " The Reynolds number. ");
+      prm.declare_entry("Mach",
+                        "1.0",
+                        Patterns::Double(0.0),
+                        " The Mach number. ");
       prm.declare_entry("Cs2",
                         "0.01",
                         Patterns::Double(0.0),
@@ -201,6 +207,7 @@ namespace RunTimeParameters {
       initial_time = prm.get_double("initial_time");
       final_time   = prm.get_double("final_time");
       Reynolds     = prm.get_double("Reynolds");
+      Mach         = prm.get_double("Mach");
       Cs2          = prm.get_double("Cs2");
     }
     prm.leave_subsection();
