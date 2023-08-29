@@ -143,6 +143,7 @@ private:
 
   /*--- Technical member to handle the various steps ---*/
   std::shared_ptr<MatrixFree<dim, double>> matrix_free_storage;
+  MappingQ1<dim> mapping;
 
   /*--- Now we need an instance of the class implemented before with the weak form ---*/
   NavierStokesProjectionOperator<dim, EquationData::degree_p, EquationData::degree_p + 1,
@@ -215,6 +216,7 @@ NavierStokesProjection<dim>::NavierStokesProjection(RunTimeParameters::Data_Stor
   fe_pressure(FE_DGQ<dim>(EquationData::degree_p), 1),
   dof_handler_velocity(triangulation),
   dof_handler_pressure(triangulation),
+  mapping()
   navier_stokes_matrix(data),
   max_its(data.max_iterations),
   eps(data.eps),
@@ -250,6 +252,10 @@ NavierStokesProjection<dim>::NavierStokesProjection(RunTimeParameters::Data_Stor
     create_triangulation(n_refines);
     setup_dofs();
     initialize();
+
+    pcout << "CFL_c = " << 1.0/Ma*dt*(EquationData::degree_p + 1)*
+                           std::sqrt(dim)/GridTools::minimal_cell_diameter(triangulation, mapping)
+                        << std::endl;
   }
 
 
@@ -266,9 +272,17 @@ void NavierStokesProjection<dim>::create_triangulation(const unsigned int n_refi
   GridIn<dim> grid_in;
   grid_in.attach_triangulation(triangulation);
 
-  const std::string filename = "./" + saving_dir + "/refsquare_structured45deg_Yoon_expanded.msh";
+  const std::string filename = "./" + saving_dir + "/refcircle_structured_Tian.msh";
   std::ifstream file(filename);
   grid_in.read_msh(file);
+
+  if(restart) {
+    triangulation.load("./" + saving_dir + "/solution_ser-" + Utilities::int_to_string(step_restart, 5));
+  }
+  else {
+    pcout << "Number of refines = " << n_refines << std::endl;
+    triangulation.refine_global(n_refines);
+  }
 
   /*--- Set boundary id ---*/
   for(const auto& face : triangulation.active_face_iterators()) {
@@ -280,12 +294,12 @@ void NavierStokesProjection<dim>::create_triangulation(const unsigned int n_refi
         face->set_boundary_id(2);
       }
       // right side
-      else if(std::abs(center[0] - 70.0) < 1e-10) {
+      else if(std::abs(center[0] - 30.0) < 1e-10) {
         face->set_boundary_id(3);
       }
       // wall boundaries
       else if(std::abs(center[1] - 0.0) < 1e-10 ||
-              std::abs(center[1] - 100.0) < 1e-10) {
+              std::abs(center[1] - 20.0) < 1e-10) {
         face->set_boundary_id(1);
       }
       // cylinder boundary
@@ -295,16 +309,9 @@ void NavierStokesProjection<dim>::create_triangulation(const unsigned int n_refi
     }
   }
 
-  if(restart) {
-    triangulation.load("./" + saving_dir + "/solution_ser-" + Utilities::int_to_string(step_restart, 5));
-  }
-  else {
-    pcout << "Number of refines = " << n_refines << std::endl;
-    triangulation.refine_global(n_refines);
-  }
-
-  pcout << "CFL_c = " << 1.0/Ma*dt*(EquationData::degree_p + 1)*
-                         std::sqrt(dim)/GridTools::minimal_cell_diameter(triangulation) << std::endl;
+  /*--- Attach manifold to the boundary of the cylinder ---*/
+  /*triangulation.set_all_manifold_ids_on_boundary(4, 4);
+  triangulation.set_manifold(4, SphericalManifold<dim>(Point<dim>(10.0, 10.0)));*/
 }
 
 
@@ -366,7 +373,7 @@ void NavierStokesProjection<dim>::setup_dofs() {
 
   /*--- Initialize the matrix-free structure and size properly the vectors. Here again the
         second input argument of the 'initialize_dof_vector' method depends on the order of 'dof_handlers' ---*/
-  matrix_free_storage->reinit(MappingQ1<dim>(), dof_handlers, constraints, quadratures, additional_data);
+  matrix_free_storage->reinit(mapping, dof_handlers, constraints, quadratures, additional_data);
 
   matrix_free_storage->initialize_dof_vector(u_star, 0);
   matrix_free_storage->initialize_dof_vector(rhs_u, 0);
@@ -485,10 +492,10 @@ void NavierStokesProjection<dim>::initialize() {
     }
   }
   else {
-    VectorTools::interpolate(MappingQ1<dim>(), dof_handler_pressure, pres_init, pres_n);
+    VectorTools::interpolate(mapping, dof_handler_pressure, pres_init, pres_n);
 
-    VectorTools::interpolate(MappingQ1<dim>(), dof_handler_velocity, vel_init, u_n_minus_1);
-    VectorTools::interpolate(MappingQ1<dim>(), dof_handler_velocity, vel_init, u_n);
+    VectorTools::interpolate(mapping, dof_handler_velocity, vel_init, u_n_minus_1);
+    VectorTools::interpolate(mapping, dof_handler_velocity, vel_init, u_n);
   }
 }
 
@@ -587,7 +594,6 @@ void NavierStokesProjection<dim>::projection_step() {
   /*--- Build the preconditioner (as in step-37) ---*/
   MGTransferMatrixFree<dim, float> mg_transfer;
   mg_transfer.build(dof_handler_pressure);
-
   using SmootherType = PreconditionChebyshev<NavierStokesProjectionOperator<dim,
                                                                             EquationData::degree_p,
                                                                             EquationData::degree_p + 1,
@@ -687,7 +693,7 @@ double NavierStokesProjection<dim>::get_maximal_velocity() {
 
   std::vector<Vector<double>> velocity_values(n_q_points, Vector<double>(dim));
 
-  FEValues<dim> fe_values_velocity(fe_velocity, quadrature_formula, update_quadrature_points | update_values | update_JxW_values);
+  FEValues<dim> fe_values_velocity(mapping, fe_velocity, quadrature_formula, update_values);
 
   double max_local_velocity = 0.0;
 
@@ -738,23 +744,27 @@ void NavierStokesProjection<dim>::output_results(const unsigned int step) {
   std::vector<DataComponentInterpretation::DataComponentInterpretation>
   component_interpretation_velocity(dim, DataComponentInterpretation::component_is_part_of_vector);
   u_n.update_ghost_values();
-
   data_out.add_data_vector(dof_handler_velocity, u_n, velocity_names, component_interpretation_velocity);
+
   pres_n.update_ghost_values();
   data_out.add_data_vector(dof_handler_pressure, pres_n, "p", {DataComponentInterpretation::component_is_scalar});
-
-  std::vector<std::string> velocity_names_old(dim, "v_old");
-  u_n_minus_1.update_ghost_values();
-  data_out.add_data_vector(dof_handler_velocity, u_n_minus_1, velocity_names_old, component_interpretation_velocity);
 
   /*--- Here we rely on the postprocessor we have built ---*/
   PostprocessorVorticity<dim> postprocessor;
   data_out.add_data_vector(dof_handler_velocity, u_n, postprocessor);
 
-  data_out.build_patches(MappingQ1<dim>(), EquationData::degree_p + 1);
+  /*--- Save the results ---*/
+  data_out.build_patches(mapping, EquationData::degree_p + 1, DataOut<dim>::curved_inner_cells);
 
-  const std::string output = "./" + saving_dir + "/solution-" + Utilities::int_to_string(step, 5) + ".vtu";
+  std::string output = "./" + saving_dir + "/solution-" + Utilities::int_to_string(step, 5) + ".vtu";
   data_out.write_vtu_in_parallel(output, MPI_COMM_WORLD);
+
+  /*--- Save high order mapping ---*/
+  /*output = "./" + saving_dir + "/solution_high_order-" + Utilities::int_to_string(step, 5) + ".vtu";
+  DataOutBase::VtkFlags flags_high_order;
+  flags_high_order.write_higher_order_cells = true;
+  data_out.set_flags(flags_high_order);
+  data_out.write_vtu_in_parallel(output, MPI_COMM_WORLD);*/
 
   /*--- Serialization ---*/
   if(save_for_restart) {
@@ -860,8 +870,9 @@ void NavierStokesProjection<dim>::compute_lipschitz_number() {
   QGaussLobatto<dim> quadrature_formula(EquationData::degree_p + 2);
   const int n_q_points = quadrature_formula.size();
 
-  FEValues<dim> fe_values(fe_velocity, quadrature_formula, update_gradients);
   std::vector<std::vector<Tensor<1, dim, double>>> solution_gradients_velocity(n_q_points, std::vector<Tensor<1, dim, double>>(dim));
+
+  FEValues<dim> fe_values(mapping, fe_velocity, quadrature_formula, update_gradients);
 
   double max_local_vorticity = std::numeric_limits<double>::min();
 
@@ -908,6 +919,7 @@ void NavierStokesProjection<dim>::run(const bool verbose, const unsigned int out
   else {
     output_results(1);
   }
+
   while(std::abs(T - time) > 1e-10) {
     time += dt;
     n++;
@@ -923,16 +935,16 @@ void NavierStokesProjection<dim>::run(const bool verbose, const unsigned int out
     verbose_cout << "  Interpolating the velocity stage 1" << std::endl;
     interpolate_velocity();
 
-    verbose_cout << "  Diffusion Step stage 1 " << std::endl;
+    verbose_cout << "  Diffusion step stage 1 " << std::endl;
     diffusion_step();
 
-    verbose_cout << "  Projection Step stage 1" << std::endl;
+    verbose_cout << "  Projection step stage 1" << std::endl;
     project_grad(1);
     u_tmp.equ(gamma*dt, u_tmp);
-    u_star += u_tmp; /*--- In the rhs of the projection step we need u_star + gamma*dt*grad(pres_n) and we save it into u_star ---*/
+    u_star.add(1.0, u_tmp); /*--- In the rhs of the projection step we need u_star + gamma*dt*grad(pres_n) and we save it into u_star ---*/
     projection_step();
 
-    verbose_cout << "  Updating the Velocity stage 1" << std::endl;
+    verbose_cout << "  Updating the velocity stage 1" << std::endl;
     u_n_gamma.equ(1.0, u_star);
     project_grad(2);
     grad_pres_n_gamma.equ(1.0, u_tmp); /*--- We save grad(pres_n_gamma), because we will need it soon ---*/
@@ -950,25 +962,26 @@ void NavierStokesProjection<dim>::run(const bool verbose, const unsigned int out
     verbose_cout << "  Interpolating the velocity stage 2" << std::endl;
     interpolate_velocity();
 
-    verbose_cout << "  Diffusion Step stage 2 " << std::endl;
+    verbose_cout << "  Diffusion step stage 2 " << std::endl;
     diffusion_step();
 
-    verbose_cout << "  Projection Step stage 2" << std::endl;
+    verbose_cout << "  Projection step stage 2" << std::endl;
     u_tmp.equ((1.0 - gamma)*dt, grad_pres_n_gamma);
     u_star.add(1.0, u_tmp);  /*--- In the rhs of the projection step we need u_star + (1 - gamma)*dt*grad(pres_n_gamma) ---*/
     projection_step();
 
-    verbose_cout << "  Updating the Velocity stage 2" << std::endl;
+    verbose_cout << "  Updating the velocity stage 2" << std::endl;
     u_n.equ(1.0, u_star);
     project_grad(1);
     u_tmp.equ((gamma - 1.0)*dt, u_tmp);
     u_n.add(1.0, u_tmp);  /*--- u_n = u_star - (1 - gamma)*dt*grad(pres_n) ---*/
 
     const double max_vel = get_maximal_velocity();
-    pcout<< "Maximal velocity = " << max_vel << std::endl;
+    pcout<< "Maximum velocity = " << max_vel << std::endl;
     /*--- The Courant number is computed taking into account the polynomial degree for the velocity ---*/
     pcout << "CFL_u = " << dt*max_vel*(EquationData::degree_p + 1)*
-                           std::sqrt(dim)/GridTools::minimal_cell_diameter(triangulation) << std::endl;
+                           std::sqrt(dim)/GridTools::minimal_cell_diameter(triangulation, mapping)
+                        << std::endl;
 
     /*--- Now we focus on the statistics ---*/
     compute_lift_and_drag();

@@ -662,7 +662,7 @@ namespace NS_TRBDF2 {
                               a31*0.5*lambda_n*jump_u_n - a32*0.5*lambda_n_gamma*jump_u_n_gamma, q);
           phi_m.submit_value(-(a31/Re*avg_grad_u_n + a32/Re*avg_grad_u_n_gamma -
                                a31*avg_tensor_product_u_n - a32*avg_tensor_product_u_n_gamma)*n_plus + avg_pres_n*n_plus +
-                               a31*0.5*lambda_n*jump_u_n + a32*0.5*lambda_n_gamma*jump_u_n_gamma, q);
+                             a31*0.5*lambda_n*jump_u_n + a32*0.5*lambda_n_gamma*jump_u_n_gamma, q);
         }
         phi_p.integrate_scatter(EvaluationFlags::values, dst);
         phi_m.integrate_scatter(EvaluationFlags::values, dst);
@@ -789,6 +789,7 @@ namespace NS_TRBDF2 {
           const auto& n_plus                   = phi.get_normal_vector(q);
 
           const auto& grad_u_n                 = phi_n.get_gradient(q);
+
           const auto& grad_u_n_gamma           = phi_n_gamma.get_gradient(q);
 
           const auto& u_n                      = phi_n.get_value(q);
@@ -1474,6 +1475,8 @@ namespace NS_TRBDF2 {
   template<int dim, int fe_degree_p, int fe_degree_v, int n_q_points_1d_p, int n_q_points_1d_v, typename Vec>
   void NavierStokesProjectionOperator<dim, fe_degree_p, fe_degree_v, n_q_points_1d_p, n_q_points_1d_v, Vec>::
   vmult_grad_p_projection(Vec& dst, const Vec& src) const {
+    src.update_ghost_values();
+
     this->data->cell_loop(&NavierStokesProjectionOperator::assemble_rhs_cell_term_projection_grad_p,
                           this, dst, src, true);
   }
