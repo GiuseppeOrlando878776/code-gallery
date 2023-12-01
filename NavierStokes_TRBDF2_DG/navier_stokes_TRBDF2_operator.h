@@ -293,6 +293,8 @@ namespace NS_TRBDF2 {
                                          const Vec&                                   src,
                                          const std::pair<unsigned int, unsigned int>& face_range) const;
 
+    /*--- Now we consider the routines for the projection of pressure gradient into the velocity finite element
+          discretization space ---*/
     void assemble_cell_term_projection_grad_p(const MatrixFree<dim, Number>&               data,
                                               Vec&                                         dst,
                                               const Vec&                                   src,
@@ -302,6 +304,7 @@ namespace NS_TRBDF2 {
                                                   const Vec&                                   src,
                                                   const std::pair<unsigned int, unsigned int>& cell_range) const;
 
+    /*--- Now we consider the routines to compute the diagonal for the matrix associated to the velocity ---*/
     void assemble_diagonal_cell_term_velocity(const MatrixFree<dim, Number>&               data,
                                               Vec&                                         dst,
                                               const unsigned int&                          src,
@@ -315,6 +318,7 @@ namespace NS_TRBDF2 {
                                                   const unsigned int&                          src,
                                                   const std::pair<unsigned int, unsigned int>& face_range) const;
 
+    /*--- Now we consider the routines to compute the diagonal for the matrix associated to the pressure ---*/
     void assemble_diagonal_cell_term_pressure(const MatrixFree<dim, Number>&               data,
                                               Vec&                                         dst,
                                               const unsigned int&                          src,
@@ -327,6 +331,12 @@ namespace NS_TRBDF2 {
                                                   Vec&                                         dst,
                                                   const unsigned int&                          src,
                                                   const std::pair<unsigned int, unsigned int>& face_range) const;
+
+    /*--- Now we consider the routines to compute the diagonal for the matrix associated to the projection of pressure gradient ---*/
+    void assemble_diagonal_cell_term_projection_grad_p(const MatrixFree<dim, Number>&               data,
+                                                       Vec&                                         dst,
+                                                       const unsigned int&                          src,
+                                                       const std::pair<unsigned int, unsigned int>& cell_range) const;
 };
 
 
@@ -2146,6 +2156,49 @@ namespace NS_TRBDF2 {
   }
 
 
+  template<int dim, int fe_degree_p, int fe_degree_v, int n_q_points_1d_p, int n_q_points_1d_v, typename Vec>
+  void NavierStokesProjectionOperator<dim, fe_degree_p, fe_degree_v, n_q_points_1d_p, n_q_points_1d_v, Vec>::
+  assemble_diagonal_cell_term_projection_grad_p(const MatrixFree<dim, Number>&               data,
+                                                Vec&                                         dst,
+                                                const unsigned int&                          ,
+                                                const std::pair<unsigned int, unsigned int>& cell_range) const {
+    FEEvaluation<dim, fe_degree_v, n_q_points_1d_v, dim, Number> phi(data, 0);
+
+    AlignedVector<Tensor<1, dim, VectorizedArray<Number>>> diagonal(phi.dofs_per_component);
+    /*--- Build a vector of ones to be tested (here we will see the velocity as a whole vector, since
+                                               dof_handler_velocity is vectorial and so the dof values are vectors). ---*/
+    Tensor<1, dim, VectorizedArray<Number>> tmp;
+    for(unsigned int d = 0; d < dim; ++d) {
+      tmp[d] = make_vectorized_array<Number>(1.0);
+    }
+
+    /*--- Loop over cells in the range ---*/
+    for(unsigned int cell = cell_range.first; cell < cell_range.second; ++cell) {
+      phi.reinit(cell);
+
+      /*--- Loop over dofs ---*/
+      for(unsigned int i = 0; i < phi.dofs_per_component; ++i) {
+        for(unsigned int j = 0; j < phi.dofs_per_component; ++j) {
+          phi.submit_dof_value(Tensor<1, dim, VectorizedArray<Number>>(), j); /*--- Set all dofs to zero ---*/
+        }
+        phi.submit_dof_value(tmp, i); /*--- Set dof i equal to one ---*/
+        phi.evaluate(EvaluationFlags::values);
+
+        /*--- Loop over quadrature points ---*/
+        for(unsigned int q = 0; q < phi.n_q_points; ++q) {
+          phi.submit_value(phi.get_value(q), q);
+        }
+        phi.integrate(EvaluationFlags::values);
+        diagonal[i] = phi.get_dof_value(i);
+      }
+      for(unsigned int i = 0; i < phi.dofs_per_component; ++i) {
+        phi.submit_dof_value(diagonal[i], i);
+      }
+      phi.distribute_local_to_global(dst);
+    }
+  }
+
+
   // Put together all previous steps. We create a dummy auxliary vector that serves for the src input argument in
   // the previous functions that as we have seen before is unused. Then everything is done by the 'loop' function
   // and it is saved in the field 'inverse_diagonal_entries' already present in the base class. Anyway since there is
@@ -2154,7 +2207,7 @@ namespace NS_TRBDF2 {
   template<int dim, int fe_degree_p, int fe_degree_v, int n_q_points_1d_p, int n_q_points_1d_v, typename Vec>
   void NavierStokesProjectionOperator<dim, fe_degree_p, fe_degree_v, n_q_points_1d_p, n_q_points_1d_v, Vec>::
   compute_diagonal() {
-    Assert(NS_stage == 1 || NS_stage == 2, ExcInternalError());
+    Assert(NS_stage > 0 && NS_stage <= 3, ExcInternalError());
 
     this->inverse_diagonal_entries.reset(new DiagonalMatrix<Vec>());
     auto& inverse_diagonal = this->inverse_diagonal_entries->get_vector();
@@ -2188,6 +2241,14 @@ namespace NS_TRBDF2 {
          (this->assemble_diagonal_boundary_term_pressure)(data, dst, src, boundary_range);
        },
        1);
+    }
+    else if(NS_stage == 3) {
+      this->data->initialize_dof_vector(inverse_diagonal, 0);
+
+      const unsigned int dummy = 0;
+
+      this->data->cell_loop(&NavierStokesProjectionOperator::assemble_diagonal_cell_term_projection_grad_p,
+                            this, inverse_diagonal, dummy, false);
     }
 
     for(unsigned int i = 0; i < inverse_diagonal.locally_owned_size(); ++i) {

@@ -130,9 +130,9 @@ protected:
 
   void project_grad(const unsigned int flag);
 
-  double get_maximal_velocity();
+  double get_max_velocity();
 
-  double get_maximal_difference_velocity();
+  double get_max_difference_velocity();
 
   void output_results(const unsigned int step);
 
@@ -145,6 +145,8 @@ private:
   std::shared_ptr<MatrixFree<dim, double>> matrix_free_storage;
   MappingQ1<dim> mapping;
 
+  MappingQ1<dim> mapping_mg;
+
   /*--- Now we need an instance of the class implemented before with the weak form ---*/
   NavierStokesProjectionOperator<dim, EquationData::degree_p, EquationData::degree_p + 1,
                                  EquationData::degree_p + 1, static_cast<int>(1.5*(EquationData::degree_p + 1)) + 1,
@@ -155,6 +157,10 @@ private:
                                                EquationData::degree_p + 1, static_cast<int>(1.5*(EquationData::degree_p + 1)) + 1,
                                                LinearAlgebra::distributed::Vector<float>>> mg_matrices;
 
+  std::vector<const DoFHandler<dim>*> dof_handlers; /*--- Vector of dof_handlers to feed the 'MatrixFree'. Here the order
+                                                          counts and enters into the game as parameter of FEEvaluation and
+                                                          FEFaceEvaluation in the previous class ---*/
+
   /*--- Here we define two 'AffineConstraints' instance, one for each finite element space.
         This is just a technical issue, due to MatrixFree requirements. In general
         this class is used to impose boundary conditions (or any kind of constraints), but in this case, since
@@ -162,6 +168,14 @@ private:
         will be default constructed ---*/
   AffineConstraints<double> constraints_velocity,
                             constraints_pressure;
+
+  std::vector<const AffineConstraints<float>*> constraints_mg;
+  AffineConstraints<float> constraints_velocity_mg;
+  AffineConstraints<float> constraints_pressure_mg;
+
+  std::vector<QGauss<1>> quadratures; /*--- The 'MatrixFree' structure wants a quadrature formula for 1D
+                                            (this is way the template parameter of the previous class was called 'n_q_points_1d_p'
+                                             and 'n_q_points_1d_v' and the reason of '1' as QGauss template parameter). ---*/
 
   /*--- Now a bunch of variables handled by 'ParamHandler' introduced at the beginning of the code ---*/
   unsigned int max_its;
@@ -217,6 +231,7 @@ NavierStokesProjection<dim>::NavierStokesProjection(RunTimeParameters::Data_Stor
   dof_handler_velocity(triangulation),
   dof_handler_pressure(triangulation),
   mapping(),
+  mapping_mg(),
   navier_stokes_matrix(data),
   max_its(data.max_iterations),
   eps(data.eps),
@@ -272,7 +287,7 @@ void NavierStokesProjection<dim>::create_triangulation(const unsigned int n_refi
   GridIn<dim> grid_in;
   grid_in.attach_triangulation(triangulation);
 
-  const std::string filename = "./" + saving_dir + "/refcircle_structured_Tian.msh";
+  const std::string filename = "./" + saving_dir + "/circle_tian.msh";
   std::ifstream file(filename);
   grid_in.read_msh(file);
 
@@ -351,9 +366,7 @@ void NavierStokesProjection<dim>::setup_dofs() {
                                                          update_quadrature_points | update_JxW_values);
   additional_data.tasks_parallel_scheme               = MatrixFree<dim, double>::AdditionalData::none;
 
-  std::vector<const DoFHandler<dim>*> dof_handlers; /*--- Vector of dof_handlers to feed the 'MatrixFree'. Here the order
-                                                          counts and enters into the game as parameter of FEEvaluation and
-                                                          FEFaceEvaluation in the previous class ---*/
+  dof_handlers.clear();
   dof_handlers.push_back(&dof_handler_velocity);
   dof_handlers.push_back(&dof_handler_pressure);
 
@@ -365,9 +378,7 @@ void NavierStokesProjection<dim>::setup_dofs() {
   constraints.push_back(&constraints_velocity);
   constraints.push_back(&constraints_pressure);
 
-  std::vector<QGauss<1>> quadratures; /*--- The 'MatrixFree' structure wants a quadrature formula for 1D
-                                            (this is way the template parameter of the previous class was called 'n_q_points_1d_p'
-                                             and 'n_q_points_1d_v' and the reason of '1' as QGauss template parameter). ---*/
+  quadratures.clear();
   quadratures.push_back(QGauss<1>(static_cast<int>(1.5*(EquationData::degree_p + 1)) + 1));
   quadratures.push_back(QGauss<1>(EquationData::degree_p + 1));
 
@@ -399,35 +410,16 @@ void NavierStokesProjection<dim>::setup_dofs() {
   const unsigned int nlevels = triangulation.n_global_levels();
   mg_matrices.resize(0, nlevels - 1);
   for(unsigned int level = 0; level < nlevels; ++level) {
-    typename MatrixFree<dim, float>::AdditionalData additional_data_mg;
-
-    additional_data_mg.tasks_parallel_scheme               = MatrixFree<dim, float>::AdditionalData::none;
-    additional_data_mg.mapping_update_flags                = (update_values | update_gradients | update_JxW_values);
-    additional_data_mg.mapping_update_flags_inner_faces    = (update_values | update_gradients | update_normal_vectors | update_JxW_values);
-    additional_data_mg.mapping_update_flags_boundary_faces = (update_values | update_gradients | update_normal_vectors | update_JxW_values);
-    additional_data_mg.mg_level                            = level;
-
-    std::vector<const DoFHandler<dim>*> dof_handlers_mg;
-    dof_handlers_mg.push_back(&dof_handler_velocity);
-    dof_handlers_mg.push_back(&dof_handler_pressure);
-    std::vector<const AffineConstraints<float>*> constraints_mg;
-    AffineConstraints<float> constraints_velocity_mg;
-    constraints_velocity_mg.clear();
-    constraints_velocity_mg.close();
-    constraints_mg.push_back(&constraints_velocity_mg);
-    AffineConstraints<float> constraints_pressure_mg;
-    constraints_pressure_mg.clear();
-    constraints_pressure_mg.close();
-    constraints_mg.push_back(&constraints_pressure_mg);
-
-    std::shared_ptr<MatrixFree<dim, float>> mg_mf_storage_level(new MatrixFree<dim, float>());
-    mg_mf_storage_level->reinit(MappingQ1<dim>(), dof_handlers_mg, constraints_mg, quadratures, additional_data_mg);
-    const std::vector<unsigned int> tmp = {1};
-    mg_matrices[level].initialize(mg_mf_storage_level, tmp, tmp);
     mg_matrices[level].set_dt(dt);
     mg_matrices[level].set_Mach(Ma);
-    mg_matrices[level].set_NS_stage(2);
   }
+  constraints_velocity_mg.clear();
+  constraints_velocity_mg.close();
+  constraints_pressure_mg.clear();
+  constraints_pressure_mg.close();
+  constraints_mg.clear();
+  constraints_mg.push_back(&constraints_velocity_mg);
+  constraints_mg.push_back(&constraints_pressure_mg);
 }
 
 
@@ -605,6 +597,19 @@ void NavierStokesProjection<dim>::projection_step() {
   MGLevelObject<typename SmootherType::AdditionalData> smoother_data;
   smoother_data.resize(0, triangulation.n_global_levels() - 1);
   for(unsigned int level = 0; level < triangulation.n_global_levels(); ++level) {
+    typename MatrixFree<dim, float>::AdditionalData additional_data_mg;
+
+    additional_data_mg.tasks_parallel_scheme               = MatrixFree<dim, float>::AdditionalData::none;
+    additional_data_mg.mapping_update_flags                = (update_values | update_gradients | update_JxW_values);
+    additional_data_mg.mapping_update_flags_inner_faces    = (update_values | update_gradients | update_normal_vectors | update_JxW_values);
+    additional_data_mg.mapping_update_flags_boundary_faces = (update_values | update_gradients | update_normal_vectors | update_JxW_values);
+    additional_data_mg.mg_level                            = level;
+
+    std::shared_ptr<MatrixFree<dim, float>> mg_mf_storage_level(new MatrixFree<dim, float>());
+    mg_mf_storage_level->reinit(mapping_mg, dof_handlers, constraints_mg, quadratures, additional_data_mg);
+    mg_matrices[level].initialize(mg_mf_storage_level, tmp, tmp);
+    mg_matrices[level].set_NS_stage(2);
+
     if(level > 0) {
       smoother_data[level].smoothing_range     = 15.0;
       smoother_data[level].degree              = 3;
@@ -676,18 +681,82 @@ void NavierStokesProjection<dim>::project_grad(const unsigned int flag) {
   /*--- We conventionally decide that the this corresponds to third stage ---*/
   navier_stokes_matrix.set_NS_stage(3);
 
-  /*--- Solve the system ---*/
+  /*--- Build the linear solver (Conjugate Gradient in this case) ---*/
   SolverControl solver_control(max_its, 1e-12*rhs_u.l2_norm());
   SolverCG<LinearAlgebra::distributed::Vector<double>> cg(solver_control);
-  cg.solve(navier_stokes_matrix, u_tmp, rhs_u, PreconditionIdentity());
+
+  /*--- Build the preconditioner (as in step-37) ---*/
+  MGTransferMatrixFree<dim, float> mg_transfer;
+  mg_transfer.build(dof_handler_velocity);
+  using SmootherType = PreconditionChebyshev<NavierStokesProjectionOperator<dim,
+                                                                            EquationData::degree_p,
+                                                                            EquationData::degree_p + 1,
+                                                                            EquationData::degree_p + 1,
+                                                                            static_cast<int>(1.5*(EquationData::degree_p + 1)) + 1,
+                                                                            LinearAlgebra::distributed::Vector<float>>,
+                                             LinearAlgebra::distributed::Vector<float>>;
+  mg::SmootherRelaxation<SmootherType, LinearAlgebra::distributed::Vector<float>> mg_smoother;
+  MGLevelObject<typename SmootherType::AdditionalData> smoother_data;
+  smoother_data.resize(0, triangulation.n_global_levels() - 1);
+  for(unsigned int level = 0; level < triangulation.n_global_levels(); ++level) {
+    typename MatrixFree<dim, float>::AdditionalData additional_data_mg;
+
+    additional_data_mg.tasks_parallel_scheme               = MatrixFree<dim, float>::AdditionalData::none;
+    additional_data_mg.mapping_update_flags                = (update_values | update_JxW_values);
+    additional_data_mg.mapping_update_flags_inner_faces    = update_default;
+    additional_data_mg.mapping_update_flags_boundary_faces = update_default;
+    additional_data_mg.mg_level                            = level;
+
+    std::shared_ptr<MatrixFree<dim, float>> mg_mf_storage_level(new MatrixFree<dim, float>());
+    mg_mf_storage_level->reinit(mapping_mg, dof_handlers, constraints_mg, quadratures, additional_data_mg);
+    mg_matrices[level].initialize(mg_mf_storage_level, tmp, tmp);
+    mg_matrices[level].set_NS_stage(3);
+
+    if(level > 0) {
+      smoother_data[level].smoothing_range     = 15.0;
+      smoother_data[level].degree              = 3;
+      smoother_data[level].eig_cg_n_iterations = 10;
+    }
+    else {
+      smoother_data[0].smoothing_range     = 2e-2;
+      smoother_data[0].degree              = numbers::invalid_unsigned_int;
+      smoother_data[0].eig_cg_n_iterations = mg_matrices[0].m();
+    }
+    mg_matrices[level].compute_diagonal();
+    smoother_data[level].preconditioner = mg_matrices[level].get_matrix_diagonal_inverse();
+  }
+  mg_smoother.initialize(mg_matrices, smoother_data);
+
+  PreconditionIdentity                                identity;
+  SolverCG<LinearAlgebra::distributed::Vector<float>> cg_mg(solver_control);
+  MGCoarseGridIterativeSolver<LinearAlgebra::distributed::Vector<float>,
+                              SolverCG<LinearAlgebra::distributed::Vector<float>>,
+                              NavierStokesProjectionOperator<dim,
+                                                             EquationData::degree_p,
+                                                             EquationData::degree_p + 1,
+                                                             EquationData::degree_p + 1,
+                                                             static_cast<int>(1.5*(EquationData::degree_p + 1)) + 1,
+                                                             LinearAlgebra::distributed::Vector<float>>,
+                              PreconditionIdentity> mg_coarse(cg_mg, mg_matrices[0], identity);
+
+  mg::Matrix<LinearAlgebra::distributed::Vector<float>> mg_matrix(mg_matrices);
+
+  Multigrid<LinearAlgebra::distributed::Vector<float>> mg(mg_matrix, mg_coarse, mg_transfer, mg_smoother, mg_smoother);
+
+  PreconditionMG<dim,
+                 LinearAlgebra::distributed::Vector<float>,
+                 MGTransferMatrixFree<dim, float>> preconditioner(dof_handler_velocity, mg, mg_transfer);
+
+  /*--- Solve the linear system ---*/
+  cg.solve(navier_stokes_matrix, u_tmp, rhs_u, preconditioner);
 }
 
 
-// The following function is used in determining the maximal velocity
+// The following function is used in determining the maximum velocity
 // in order to compute the Courant number.
 //
 template<int dim>
-double NavierStokesProjection<dim>::get_maximal_velocity() {
+double NavierStokesProjection<dim>::get_max_velocity() {
   QGaussLobatto<dim> quadrature_formula(EquationData::degree_p + 2);
   const int n_q_points = quadrature_formula.size();
 
@@ -716,11 +785,11 @@ double NavierStokesProjection<dim>::get_maximal_velocity() {
 }
 
 
-// The following function is used in determining the maximal nodal difference
+// The following function is used in determining the maximum nodal difference
 // between old and current velocity value in order to see if we have reched steady-state.
 //
 template<int dim>
-double NavierStokesProjection<dim>::get_maximal_difference_velocity() {
+double NavierStokesProjection<dim>::get_max_difference_velocity() {
   u_tmp.equ(1.0, u_n);
   u_tmp.add(-1.0, u_n_minus_1);
 
@@ -863,7 +932,7 @@ void NavierStokesProjection<dim>::compute_lift_and_drag() {
 }
 
 
-// compute maximal local voriticity
+// Compute maximum local vorticity
 //
 template<int dim>
 void NavierStokesProjection<dim>::compute_lipschitz_number() {
@@ -976,7 +1045,7 @@ void NavierStokesProjection<dim>::run(const bool verbose, const unsigned int out
     u_tmp.equ((gamma - 1.0)*dt, u_tmp);
     u_n.add(1.0, u_tmp);  /*--- u_n = u_star - (1 - gamma)*dt*grad(pres_n) ---*/
 
-    const double max_vel = get_maximal_velocity();
+    const double max_vel = get_max_velocity();
     pcout<< "Maximum velocity = " << max_vel << std::endl;
     /*--- The Courant number is computed taking into account the polynomial degree for the velocity ---*/
     pcout << "CFL_u = " << dt*max_vel*(EquationData::degree_p + 1)*
