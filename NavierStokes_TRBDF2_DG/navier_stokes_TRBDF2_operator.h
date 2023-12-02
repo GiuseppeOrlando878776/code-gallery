@@ -299,10 +299,19 @@ namespace NS_TRBDF2 {
                                               Vec&                                         dst,
                                               const Vec&                                   src,
                                               const std::pair<unsigned int, unsigned int>& cell_range) const;
+
     void assemble_rhs_cell_term_projection_grad_p(const MatrixFree<dim, Number>&               data,
                                                   Vec&                                         dst,
                                                   const Vec&                                   src,
                                                   const std::pair<unsigned int, unsigned int>& cell_range) const;
+    void assemble_rhs_face_term_projection_grad_p(const MatrixFree<dim, Number>&               data,
+                                                  Vec&                                         dst,
+                                                  const Vec&                                   src,
+                                                  const std::pair<unsigned int, unsigned int>& face_range) const;
+    void assemble_rhs_boundary_term_projection_grad_p(const MatrixFree<dim, Number>&               data,
+                                                      Vec&                                         dst,
+                                                      const Vec&                                   src,
+                                                      const std::pair<unsigned int, unsigned int>& face_range) const;
 
     /*--- Now we consider the routines to compute the diagonal for the matrix associated to the velocity ---*/
     void assemble_diagonal_cell_term_velocity(const MatrixFree<dim, Number>&               data,
@@ -1451,8 +1460,7 @@ namespace NS_TRBDF2 {
 
   // Before coding the 'apply_add' function, which is the one that will perform the loop, we focus on
   // the linear system that arises to project the gradient of the pressure into the velocity space.
-  // The following function assembles rhs cell term for the projection of gradient of pressure. Since no
-  // integration by parts is performed, only a cell term contribution is present.
+  // The following function assembles rhs cell term for the projection of gradient of pressure.
   //
   template<int dim, int fe_degree_p, int fe_degree_v, int n_q_points_1d_p, int n_q_points_1d_v, typename Vec>
   void NavierStokesProjectionOperator<dim, fe_degree_p, fe_degree_v, n_q_points_1d_p, n_q_points_1d_v, Vec>::
@@ -1467,13 +1475,85 @@ namespace NS_TRBDF2 {
     /*--- Loop over all cells in the range ---*/
     for(unsigned int cell = cell_range.first; cell < cell_range.second; ++cell) {
       phi_pres.reinit(cell);
-      phi_pres.gather_evaluate(src, EvaluationFlags::gradients);
+      phi_pres.gather_evaluate(src, EvaluationFlags::values);
 
       phi.reinit(cell);
 
       /*--- Loop over quadrature points ---*/
       for(unsigned int q = 0; q < phi.n_q_points; ++q) {
-        phi.submit_value(phi_pres.get_gradient(q), q);
+        phi.submit_divergence(-phi_pres.get_value(q), q);
+      }
+      phi.integrate_scatter(EvaluationFlags::gradients, dst);
+    }
+  }
+
+
+  // The following function assembles rhs face term for the projection of gradient of pressure.
+  //
+  template<int dim, int fe_degree_p, int fe_degree_v, int n_q_points_1d_p, int n_q_points_1d_v, typename Vec>
+  void NavierStokesProjectionOperator<dim, fe_degree_p, fe_degree_v, n_q_points_1d_p, n_q_points_1d_v, Vec>::
+  assemble_rhs_face_term_projection_grad_p(const MatrixFree<dim, Number>&               data,
+                                           Vec&                                         dst,
+                                           const Vec&                                   src,
+                                           const std::pair<unsigned int, unsigned int>& face_range) const {
+    /*--- We first start by declaring the suitable instances to read already available quantities. ---*/
+    FEFaceEvaluation<dim, fe_degree_v, n_q_points_1d_v, dim, Number> phi_p(data, true, 0),
+                                                                     phi_m(data, false, 0);
+    FEFaceEvaluation<dim, fe_degree_p, n_q_points_1d_v, 1, Number>   phi_pres_p(data, true, 1),
+                                                                     phi_pres_m(data, false, 1);
+
+    /*--- We loop over the faces in the range ---*/
+    for(unsigned int face = face_range.first; face < face_range.second; ++face) {
+      phi_pres_p.reinit(face);
+      phi_pres_p.gather_evaluate(src, EvaluationFlags::values);
+      phi_pres_m.reinit(face);
+      phi_pres_m.gather_evaluate(src, EvaluationFlags::values);
+
+      phi_p.reinit(face);
+      phi_m.reinit(face);
+
+      /*--- Now we loop over all the quadrature points to compute the integrals ---*/
+      for(unsigned int q = 0; q < phi_p.n_q_points; ++q) {
+        const auto& n_plus   = phi_p.get_normal_vector(q); /*--- The normal vector is the same
+                                                                 for both phi_p and phi_m. If the face is interior,
+                                                                 it correspond to the outer normal ---*/
+        const auto& pres_p   = phi_pres_p.get_value(q);
+        const auto& pres_m   = phi_pres_m.get_value(q);
+        const auto& avg_pres = 0.5*(pres_p + pres_m);
+
+        phi_p.submit_value(0.5*avg_pres*n_plus, q);
+        phi_m.submit_value(-0.5*avg_pres*n_plus, q);
+      }
+      phi_p.integrate_scatter(EvaluationFlags::values, dst);
+      phi_m.integrate_scatter(EvaluationFlags::values, dst);
+    }
+  }
+
+
+  // The following function assembles rhs boundary term for the projection of gradient of pressure.
+  //
+  template<int dim, int fe_degree_p, int fe_degree_v, int n_q_points_1d_p, int n_q_points_1d_v, typename Vec>
+  void NavierStokesProjectionOperator<dim, fe_degree_p, fe_degree_v, n_q_points_1d_p, n_q_points_1d_v, Vec>::
+  assemble_rhs_boundary_term_projection_grad_p(const MatrixFree<dim, Number>&               data,
+                                               Vec&                                         dst,
+                                               const Vec&                                   src,
+                                               const std::pair<unsigned int, unsigned int>& face_range) const {
+    /*--- We first start by declaring the suitable instances to read already available quantities. ---*/
+    FEFaceEvaluation<dim, fe_degree_v, n_q_points_1d_v, dim, Number> phi(data, true, 0);
+    FEFaceEvaluation<dim, fe_degree_p, n_q_points_1d_v, 1, Number>   phi_pres(data, true, 1);
+
+    /*--- We loop over the faces in the range ---*/
+    for(unsigned int face = face_range.first; face < face_range.second; ++face) {
+      phi_pres.reinit(face);
+      phi_pres.gather_evaluate(src, EvaluationFlags::values);
+
+      phi.reinit(face);
+
+      /*--- Now we loop over all the quadrature points to compute the integrals ---*/
+      for(unsigned int q = 0; q < phi.n_q_points; ++q) {
+        const auto& n_plus = phi.get_normal_vector(q);
+
+        phi.submit_value(0.5*phi_pres.get_value(q)*n_plus, q);
       }
       phi.integrate_scatter(EvaluationFlags::values, dst);
     }
@@ -1487,8 +1567,12 @@ namespace NS_TRBDF2 {
   vmult_grad_p_projection(Vec& dst, const Vec& src) const {
     src.update_ghost_values();
 
-    this->data->cell_loop(&NavierStokesProjectionOperator::assemble_rhs_cell_term_projection_grad_p,
-                          this, dst, src, true);
+    this->data->loop(&NavierStokesProjectionOperator::assemble_rhs_cell_term_projection_grad_p,
+                     &NavierStokesProjectionOperator::assemble_rhs_face_term_projection_grad_p,
+                     &NavierStokesProjectionOperator::assemble_rhs_boundary_term_projection_grad_p,
+                     this, dst, src, true,
+                     MatrixFree<dim, Number>::DataAccessOnFaces::unspecified,
+                     MatrixFree<dim, Number>::DataAccessOnFaces::unspecified);
   }
 
 
@@ -2228,7 +2312,7 @@ namespace NS_TRBDF2 {
        0);
     }
     else if(NS_stage == 2) {
-        ::MatrixFreeTools::compute_diagonal<dim, Number, VectorizedArray<Number>>
+      ::MatrixFreeTools::compute_diagonal<dim, Number, VectorizedArray<Number>>
       (*(this->data),
        inverse_diagonal,
        [&](const auto& data, auto& dst, const auto& src, const auto& cell_range) {
