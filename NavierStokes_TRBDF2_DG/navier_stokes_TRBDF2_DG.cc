@@ -148,13 +148,13 @@ private:
   MappingQ1<dim> mapping_mg;
 
   /*--- Now we need an instance of the class implemented before with the weak form ---*/
-  NavierStokesProjectionOperator<dim, EquationData::degree_p, EquationData::degree_p + 1,
-                                 EquationData::degree_p + 1, static_cast<int>(1.5*(EquationData::degree_p + 1)) + 1,
+  NavierStokesProjectionOperator<dim, EquationData::degree_p, EquationData::degree_v,
+                                 EquationData::degree_p + 1, static_cast<int>(1.5*EquationData::degree_v) + 1,
                                  LinearAlgebra::distributed::Vector<double>> navier_stokes_matrix;
 
   /*--- This is an instance for geometric multigrid preconditioner ---*/
-  MGLevelObject<NavierStokesProjectionOperator<dim, EquationData::degree_p, EquationData::degree_p + 1,
-                                               EquationData::degree_p + 1, static_cast<int>(1.5*(EquationData::degree_p + 1)) + 1,
+  MGLevelObject<NavierStokesProjectionOperator<dim, EquationData::degree_p, EquationData::degree_v,
+                                               EquationData::degree_p + 1, static_cast<int>(1.5*EquationData::degree_v) + 1,
                                                LinearAlgebra::distributed::Vector<float>>> mg_matrices;
 
   std::vector<const DoFHandler<dim>*> dof_handlers; /*--- Vector of dof_handlers to feed the 'MatrixFree'. Here the order
@@ -226,7 +226,7 @@ NavierStokesProjection<dim>::NavierStokesProjection(RunTimeParameters::Data_Stor
   pres_init(data.initial_time),
   triangulation(MPI_COMM_WORLD, parallel::distributed::Triangulation<dim>::limit_level_difference_at_vertices,
                 parallel::distributed::Triangulation<dim>::construct_multigrid_hierarchy),
-  fe_velocity(FE_DGQ<dim>(EquationData::degree_p + 1), dim),
+  fe_velocity(FE_DGQ<dim>(EquationData::degree_v), dim),
   fe_pressure(FE_DGQ<dim>(EquationData::degree_p), 1),
   dof_handler_velocity(triangulation),
   dof_handler_pressure(triangulation),
@@ -268,7 +268,7 @@ NavierStokesProjection<dim>::NavierStokesProjection(RunTimeParameters::Data_Stor
     setup_dofs();
     initialize();
 
-    pcout << "CFL_c = " << 1.0/Ma*dt*(EquationData::degree_p + 1)*
+    pcout << "CFL_c = " << 1.0/Ma*dt*EquationData::degree_v*
                            std::sqrt(dim)/GridTools::minimal_cell_diameter(triangulation, mapping)
                         << std::endl;
   }
@@ -379,7 +379,7 @@ void NavierStokesProjection<dim>::setup_dofs() {
   constraints.push_back(&constraints_pressure);
 
   quadratures.clear();
-  quadratures.push_back(QGauss<1>(static_cast<int>(1.5*(EquationData::degree_p + 1)) + 1));
+  quadratures.push_back(QGauss<1>(static_cast<int>(1.5*EquationData::degree_v) + 1));
   quadratures.push_back(QGauss<1>(EquationData::degree_p + 1));
 
   /*--- Initialize the matrix-free structure and size properly the vectors. Here again the
@@ -548,9 +548,9 @@ void NavierStokesProjection<dim>::diffusion_step() {
   /*--- Build a Jacobi preconditioner and solve ---*/
   PreconditionJacobi<NavierStokesProjectionOperator<dim,
                                                     EquationData::degree_p,
+                                                    EquationData::degree_v,
                                                     EquationData::degree_p + 1,
-                                                    EquationData::degree_p + 1,
-                                                    static_cast<int>(1.5*(EquationData::degree_p + 1)) + 1,
+                                                    static_cast<int>(1.5*EquationData::degree_v) + 1,
                                                     LinearAlgebra::distributed::Vector<double>>> preconditioner;
   navier_stokes_matrix.compute_diagonal();
   preconditioner.initialize(navier_stokes_matrix);
@@ -588,9 +588,9 @@ void NavierStokesProjection<dim>::projection_step() {
   mg_transfer.build(dof_handler_pressure);
   using SmootherType = PreconditionChebyshev<NavierStokesProjectionOperator<dim,
                                                                             EquationData::degree_p,
+                                                                            EquationData::degree_v,
                                                                             EquationData::degree_p + 1,
-                                                                            EquationData::degree_p + 1,
-                                                                            static_cast<int>(1.5*(EquationData::degree_p + 1)) + 1,
+                                                                            static_cast<int>(1.5*EquationData::degree_v) + 1,
                                                                             LinearAlgebra::distributed::Vector<float>>,
                                              LinearAlgebra::distributed::Vector<float>>;
   mg::SmootherRelaxation<SmootherType, LinearAlgebra::distributed::Vector<float>> mg_smoother;
@@ -631,9 +631,9 @@ void NavierStokesProjection<dim>::projection_step() {
                               SolverCG<LinearAlgebra::distributed::Vector<float>>,
                               NavierStokesProjectionOperator<dim,
                                                              EquationData::degree_p,
+                                                             EquationData::degree_v,
                                                              EquationData::degree_p + 1,
-                                                             EquationData::degree_p + 1,
-                                                             static_cast<int>(1.5*(EquationData::degree_p + 1)) + 1,
+                                                             static_cast<int>(1.5*EquationData::degree_v) + 1,
                                                              LinearAlgebra::distributed::Vector<float>>,
                               PreconditionIdentity> mg_coarse(cg_mg, mg_matrices[0], identity);
 
@@ -690,9 +690,9 @@ void NavierStokesProjection<dim>::project_grad(const unsigned int flag) {
   mg_transfer.build(dof_handler_velocity);
   using SmootherType = PreconditionChebyshev<NavierStokesProjectionOperator<dim,
                                                                             EquationData::degree_p,
+                                                                            EquationData::degree_v,
                                                                             EquationData::degree_p + 1,
-                                                                            EquationData::degree_p + 1,
-                                                                            static_cast<int>(1.5*(EquationData::degree_p + 1)) + 1,
+                                                                            static_cast<int>(1.5*EquationData::degree_v) + 1,
                                                                             LinearAlgebra::distributed::Vector<float>>,
                                              LinearAlgebra::distributed::Vector<float>>;
   mg::SmootherRelaxation<SmootherType, LinearAlgebra::distributed::Vector<float>> mg_smoother;
@@ -733,9 +733,9 @@ void NavierStokesProjection<dim>::project_grad(const unsigned int flag) {
                               SolverCG<LinearAlgebra::distributed::Vector<float>>,
                               NavierStokesProjectionOperator<dim,
                                                              EquationData::degree_p,
+                                                             EquationData::degree_v,
                                                              EquationData::degree_p + 1,
-                                                             EquationData::degree_p + 1,
-                                                             static_cast<int>(1.5*(EquationData::degree_p + 1)) + 1,
+                                                             static_cast<int>(1.5*EquationData::degree_v) + 1,
                                                              LinearAlgebra::distributed::Vector<float>>,
                               PreconditionIdentity> mg_coarse(cg_mg, mg_matrices[0], identity);
 
@@ -823,7 +823,7 @@ void NavierStokesProjection<dim>::output_results(const unsigned int step) {
   data_out.add_data_vector(dof_handler_velocity, u_n, postprocessor);
 
   /*--- Save the results ---*/
-  data_out.build_patches(mapping, EquationData::degree_p + 1, DataOut<dim>::curved_inner_cells);
+  data_out.build_patches(mapping, EquationData::degree_v, DataOut<dim>::curved_inner_cells);
 
   std::string output = "./" + saving_dir + "/solution-" + Utilities::int_to_string(step, 5) + ".vtu";
   data_out.write_vtu_in_parallel(output, MPI_COMM_WORLD);
@@ -1048,7 +1048,7 @@ void NavierStokesProjection<dim>::run(const bool verbose, const unsigned int out
     const double max_vel = get_max_velocity();
     pcout<< "Maximum velocity = " << max_vel << std::endl;
     /*--- The Courant number is computed taking into account the polynomial degree for the velocity ---*/
-    pcout << "CFL_u = " << dt*max_vel*(EquationData::degree_p + 1)*
+    pcout << "CFL_u = " << dt*max_vel*EquationData::degree_v*
                            std::sqrt(dim)/GridTools::minimal_cell_diameter(triangulation, mapping)
                         << std::endl;
 

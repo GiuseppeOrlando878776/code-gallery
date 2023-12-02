@@ -10,9 +10,8 @@
 namespace EquationData {
   using namespace dealii;
 
-  static const unsigned int degree_p = 1; /*--- Polynomial degree for the pressure. The one for the velocity
-                                                will be equal to degree_p + 1, but its value can be easily changed
-                                                in the template parameter list of the classes with weak form ---*/
+  static const unsigned int degree_p = 1;        /*--- Polynomial degree for the pressure. ---*/
+  static const unsigned int degree_v = degree_p; /*--- Polynomial degree for the velocity. ---*/
 
   // We declare class that describes the boundary conditions and initial one for velocity:
   //
